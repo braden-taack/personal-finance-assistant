@@ -1,7 +1,7 @@
 # Finance Tracker
 
-Local personal-finance app: SQLite + scikit-learn + LM Studio + Streamlit.
-Everything runs on your machine; the only network call is to your local LM Studio server.
+Local personal-finance app: SQLite + scikit-learn + LM Studio + Streamlit, laid out to mirror my Apple Numbers
+budget sheet. Everything runs on your machine; the only network call is to your local LM Studio server.
 
 ## Setup
 ```bash
@@ -13,33 +13,93 @@ Start LM Studio's local server (Developer tab -> Start Server, default `http://l
 Optional env vars: `FT_LLM_URL`, `FT_LLM_MODEL`, `FT_ML_THRESHOLD` (0.70), `FT_LLM_THRESHOLD` (0.60),
 `FT_DUP_WINDOW` (3 days), `FT_DUP_SIM` (0.85), `FT_DB_PATH`.
 
-## Migrating from Apple Numbers
-In Numbers: File -> Export To -> CSV. Import it on the **Import CSV** page. If the export has a category column,
-those rows are stored as trusted labels and become the model's first training data.
-Set up categories first (Categories & Model page), then import, then **Retrain model** (needs 20+ labeled rows).
+Data lives in `data/` (git-ignored): `finance.db` and `classifier.joblib`.
+
+## Schema and upgrades
+The schema version is stored in `PRAGMA user_version` and upgraded by `db.MIGRATIONS` on every start, so an
+existing `finance.db` upgrades in place without losing rows. Before upgrading a database that already has tables,
+a copy is saved as `data/finance.pre-v<N>-backup.db`.
+
+- **v1**: the original schema.
+- **v2**: `banks` table, `categories.is_savings`, `transactions.bank / shared / shared_settled / shared_settled_date`,
+  `paychecks` table. It seeds the 22 budget categories, the 4 banks, and the current month's budget and paychecks.
+  Old `account` values that name a bank (e.g. `amex`) become that bank. Old rows stored as `kind='income'` are kept
+  but left out of budgets, since income now lives in `paychecks`.
+
+## Pages
+- **Dashboard**: Month or Year view. Shows Summary by Category (Budget / Actual / Difference, green under budget,
+  red over), Table 1 (401k Saved / Liquid Saved / Net Leftover), both paychecks, the transactions, a pie chart,
+  budget-vs-actual bars, trend lines and a year Sankey (gross pay -> taxes / deductions / 401k / take-home ->
+  categories + leftover).
+- **Budgets**: one row per (month, category). A month with nothing saved uses the most recent earlier month.
+- **Paychecks**: Mid Month and End of Month paychecks side by side, with editable amounts and a computed take-home
+  total. These carry forward the same way budgets do.
+- **Shared expenses**: mark transactions shared with my roommate, track what they owe by category, settle up,
+  copy a request message and download an itemized CSV.
+- **Import CSV**, **Review queue**, **Transactions**, **Categories & Model** (categories, `is_savings`, bank settings,
+  retraining).
+
+## Banks and CSV import
+Banks are FIDELITY, C1, AMEX and DISCOVER, stored in `banks` with a saved column mapping and sign convention each.
+Only date, description and amount are required. Amount can be one signed column, or separate **Debit** and
+**Credit** columns (Capital One), in which case amount = debit - credit.
+
+1. Upload a file. The bank is pre-selected from a Bank column in the file, then the filename, then whichever bank's
+   saved mapping matches the headers. Confirm or change it; the bank applies to every row. If the file has a Bank
+   column, each row uses its own value, and blank or unknown values fall back to the confirmed bank.
+2. The column mapping and the "charges are negative" setting are pre-filled from that bank's saved settings and can
+   be saved back.
+3. **Analyze file** then flags:
+   - **Missing dates.** Rows are kept, not dropped, and you fill in the dates before importing (or choose to leave
+     those rows out).
+   - **Card payments and transfers** ("payment thank you", "autopay", "transfer from", ...), skipped by default
+     because they double-count card purchases. Fidelity "Investing Transfer" / "Savings Transfer" are not flagged;
+     they map straight to Investing / Savings.
+   - **Duplicates**, against the database and within the file. A duplicate needs the same bank, the same amount,
+     dates within 3 days and description similarity >= 85%. Legacy rows with no bank match any bank. You choose
+     skip or import per pair.
+
+**Numbers export**: in Numbers, select the Transactions table, then File -> Export To -> CSV
+(Date, Bank, Description, Category, Amount). Categories that match a budget category (case-insensitive) are
+stored as trusted `import` labels; anything else goes through the cascade.
 
 ## How categorization works
-1. **ML model** (TF-IDF word + char n-grams -> logistic regression). Confidence >= 70% -> accepted.
-2. **LM Studio LLM** is asked to choose from your category list and return JSON with a confidence. >= 60% -> accepted.
-3. **Manual review queue**: anything left is flagged with the best guess pre-selected. Your confirmations are saved
-   as `manual` labels and feed the next retrain. The model only trains on `manual`/`import` labels, never its own guesses.
+1. A CSV category that matches a budget category is kept as an `import` label.
+2. **Savings rules**: Investing / Savings transfers are categorized by rule (`rule`).
+3. **ML model** (TF-IDF word + char n-grams -> logistic regression). Confidence >= 70% is accepted.
+4. **LM Studio LLM** picks from the category list and returns JSON with a confidence. >= 60% is accepted.
+5. **Manual review queue**: anything left is flagged with the best guess pre-selected. Confirmed labels are saved
+   as `manual` and feed the next retrain. The model trains only on `manual` / `import` labels, never on its own guesses.
 
-Adding/renaming/retiring categories is on the Categories & Model page; relabel, then click **Retrain model**.
+## Shared expenses (roommate)
+The split is always 50/50 (`SHARED_SPLIT = 0.5` in `config.py`, my share). There's no per-row split and no UI
+setting. Marking is manual; a "shared before" hint appears for merchants marked shared in another month, but
+nothing is marked automatically.
 
-## Duplicate check
-On import, each row is compared to the database and to earlier rows in the same file: same amount, date within 3 days,
-description similarity >= 85%. You choose skip/import per pair (or a default for all). Decisions are logged in `dedupe_decisions`.
-Note: two legitimate identical purchases (e.g. two coffees) will be flagged; choose "Import anyway".
+- Every budget figure (Actual, Net Leftover, Liquid Saved, charts) uses `db.effective_amount()`: a shared $100
+  charge counts $50 toward its category.
+- The roommate table (Category | Shared total | Roommate owes | Settled | Still owed + Total) has month and year
+  views. "Total still owed by roommate across all months" carries unsettled balances forward.
+- Settling (selected rows, a category or the whole month) stamps `shared_settled_date`. Settled rows stay in the
+  history and only leave "Still owed".
 
-## Budgets
-One row per (month, category). A month without saved budgets uses the most recent earlier month. "Copy forward" clones a month.
+## Paychecks and Table 1
+Each paycheck has Income / Salary, then FED, State, Local and Other deductions. Take-home = gross - deductions
+= 2335.21 per paycheck by default. There is also an `Employer / 401K Match` line, which is **not** part of
+take-home.
 
-## Sign convention
-Expenses are positive; negative amounts become income/refunds-in. Tick "my bank exports spending as negative" when needed.
+- **Net Leftover** = both take-home paychecks - budget (or actual) over all categories, including Investing and
+  Savings.
+- **Liquid Saved** = the `is_savings` categories (Investing + Savings).
+- **401k Saved** = employee 401K + employer match for both paychecks. The match defaults to the employee amount
+  (968.98), an assumption that reproduces the sheet's 3875.92 = 4 x 968.98. Edit it on the Paychecks page if your
+  match differs.
 
 ## Access from elsewhere
-Keep it local for privacy. For phone/remote access, run on a home machine and use Tailscale (or similar private VPN)
-rather than exposing the port publicly; add `--server.address 0.0.0.0` only on a trusted network.
+Keep it local for privacy. For phone/remote access, run on a home machine and use Tailscale (or a similar private
+VPN) rather than exposing the port publicly; add `--server.address 0.0.0.0` only on a trusted network.
 
 ## Test
-`python smoke_test.py` runs the pipeline on a temp database.
+`python smoke_test.py` runs everything on temp databases: migration from the old schema, seeds, bank-confirmed
+import, same-bank duplicates, transfer flagging, Numbers export, paycheck take-home, Net Leftover, shared expenses
+and settling.

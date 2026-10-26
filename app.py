@@ -14,151 +14,193 @@ import db
 import importer
 import llm
 import pipeline
-from config import LLM_BASE_URL, LLM_THRESHOLD, ML_THRESHOLD
+import reports
+from config import EMPLOYER_CATEGORY, LLM_BASE_URL, LLM_THRESHOLD, ML_THRESHOLD, PAYCHECK_PERIODS, SHARED_SPLIT
 
 st.set_page_config(page_title="Finance Tracker", page_icon="💰", layout="wide")
 db.init_db()
 
 PAGE = st.sidebar.radio(
     "Go to",
-    ["Dashboard", "Budgets", "Import CSV", "Review queue", "Transactions", "Categories & Model"],
+    ["Dashboard", "Budgets", "Paychecks", "Shared expenses", "Import CSV", "Review queue", "Transactions",
+     "Categories & Model"],
 )
 q = len(db.fetch_review_queue())
 if q:
     st.sidebar.warning(f"{q} transaction(s) need review")
 st.sidebar.caption(f"LLM: {'🟢 reachable' if llm.is_available() else '🔴 offline'} ({LLM_BASE_URL})")
 
+THIS_MONTH = date.today().strftime("%Y-%m")
+PERIOD_LABEL = {"mid": "Mid Month Paycheck", "end": "End of Month Paycheck"}
+MONEY = "${:,.2f}"
+
 
 def money(x: float) -> str:
     return f"${x:,.2f}"
 
 
+def month_options() -> list[str]:
+    with db.connect() as c:
+        planned = {r[0] for r in c.execute("SELECT month FROM budgets UNION SELECT month FROM paychecks")}
+    return sorted(set(db.transaction_months()) | planned | {THIS_MONTH}, reverse=True)
+
+
+def color_difference(v: float) -> str:
+    if v > 0.005:
+        return "color: #1a7f37; font-weight: 600"
+    if v < -0.005:
+        return "color: #cf222e; font-weight: 600"
+    return ""
+
+
+def bold_total(row: pd.Series) -> list[str]:
+    return ["font-weight: 700" if row.name == reports.TOTAL else "" for _ in row]
+
+
+def paycheck_lines(months: list[str], period: str) -> pd.DataFrame:
+    """One paycheck's lines; for several months, the amounts are summed line by line."""
+    parts = [db.effective_paychecks(m) for m in months]
+    lines = pd.concat([p[p["period"] == period] for p in parts if not p.empty]) if any(
+        not p.empty for p in parts) else pd.DataFrame(columns=["category", "subcategory", "amount", "sort_order"])
+    if lines.empty:
+        return lines[["category", "subcategory", "amount"]]
+    return (lines.groupby(["category", "subcategory"], as_index=False, sort=False)
+            .agg(amount=("amount", "sum"), sort_order=("sort_order", "min"))
+            .sort_values("sort_order")[["category", "subcategory", "amount"]])
+
+
+def show_paycheck(lines: pd.DataFrame, title: str) -> None:
+    st.markdown(f"**{title}**")
+    if lines.empty:
+        st.caption("No paycheck saved — see the Paychecks page.")
+        return
+    t = db.paycheck_totals(lines)
+    view = lines.rename(columns={"category": "Category", "subcategory": "Subcategory", "amount": "Amount"})
+    view = pd.concat([view, pd.DataFrame([{"Category": "Total", "Subcategory": "Take-home", "Amount": t["take_home"]}])],
+                     ignore_index=True)
+    st.dataframe(view.style.format({"Amount": MONEY}).apply(
+        lambda r: ["font-weight: 700" if r["Category"] == "Total" else "" for _ in r], axis=1),
+        hide_index=True, width="stretch")
+    st.caption(f"{EMPLOYER_CATEGORY} lines are not part of take-home; they only count toward 401k Saved.")
+
+
 # ============================================================ Dashboard
 def page_dashboard():
     st.title("Dashboard")
-    tx = db.fetch_transactions()
-    if tx.empty:
-        st.info("No transactions yet. Use **Import CSV** to add some.")
-        return
-
-    tx["year"] = tx["date"].dt.year
-    tx["month"] = tx["date"].dt.strftime("%Y-%m")
-    years = sorted(tx["year"].unique(), reverse=True)
+    opts = month_options()
+    years = sorted({int(m[:4]) for m in opts}, reverse=True)
 
     c1, c2, c3 = st.columns([1, 1, 2])
     mode = c1.radio("View", ["Month", "Year"], horizontal=True)
-    year = c2.selectbox("Year", years)
     if mode == "Month":
-        months = sorted(tx.loc[tx["year"] == year, "month"].unique(), reverse=True)
-        month = c3.selectbox("Month", months)
-        scope = tx[tx["month"] == month]
-        label = month
+        month = c2.selectbox("Month", opts)
+        months, label, year = [month], month, int(month[:4])
     else:
-        scope = tx[tx["year"] == year]
-        label = str(year)
+        year = c2.selectbox("Year", years)
+        months, label = reports.months_of_year(year), str(year)
 
-    exp = scope[scope["kind"] == "expense"].copy()
-    inc = scope[scope["kind"] == "income"]
-    exp["category"] = exp["category"].fillna("Uncategorized")
+    tx = reports.expenses_for(months)
+    summary = reports.summary_by_category(months, tx)
+    t1 = reports.table1(months, summary)
+    pay = reports.paycheck_summary(months)
 
-    spent, earned = exp["amount"].sum(), inc["amount"].sum()
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Spent", money(spent))
-    m2.metric("Income", money(earned))
-    m3.metric("Net", money(earned - spent))
-    m4.metric("Transactions", len(scope))
+    m1.metric("Take-home pay", money(pay["take_home"]))
+    m2.metric("Spent (my share)", money(summary.loc[reports.TOTAL, "Actual"]))
+    m3.metric("Net Leftover", money(t1.loc["Actual", "Net Leftover"]))
+    m4.metric("Transactions", len(tx))
 
-    # ---- budget vs actual (month mode only)
-    if mode == "Month":
-        bud = db.effective_budget(month)
-        by_cat = exp.groupby("category")["amount"].sum()
-        if not bud.empty:
-            comp = bud.set_index("category")[["amount"]].rename(columns={"amount": "Budget"})
-            comp["Spent"] = by_cat.reindex(comp.index).fillna(0)
-            comp["Remaining"] = comp["Budget"] - comp["Spent"]
-            st.subheader(f"Budget vs actual — {label}")
-            figb = go.Figure()
-            figb.add_bar(name="Budget", x=comp.index, y=comp["Budget"])
-            figb.add_bar(name="Spent", x=comp.index, y=comp["Spent"])
-            figb.update_layout(barmode="group", height=380, margin=dict(t=20))
-            st.plotly_chart(figb, use_container_width=True)
-            st.dataframe(comp.style.format("${:,.2f}"), use_container_width=True)
-        else:
-            st.caption("No budget set for this period yet — see the Budgets page.")
-
-    # ---- pie + category table
-    left, right = st.columns(2)
+    left, right = st.columns([3, 2])
     with left:
-        st.subheader(f"Spending by category — {label}")
-        if exp.empty:
-            st.caption("No expenses in range.")
-        else:
-            pie = exp.groupby("category", as_index=False)["amount"].sum()
-            st.plotly_chart(px.pie(pie, names="category", values="amount", hole=0.4), use_container_width=True)
+        st.subheader(f"Summary by Category — {label}")
+        st.dataframe(summary.style.format(MONEY).map(color_difference, subset=["Difference"]).apply(bold_total, axis=1),
+                     width="stretch", height=(len(summary) + 1) * 35 + 3)
+        st.caption(f"Actual counts shared transactions at {SHARED_SPLIT:.0%} (my share).")
     with right:
-        st.subheader("Top merchants")
-        top = exp.groupby("description")["amount"].agg(["sum", "count"]).sort_values("sum", ascending=False).head(10)
-        st.dataframe(top.rename(columns={"sum": "Total", "count": "Count"}).style.format({"Total": "${:,.2f}"}),
-                     use_container_width=True)
+        st.subheader("Table 1")
+        st.dataframe(t1.style.format(MONEY), width="stretch")
+        st.caption("Net Leftover = take-home of both paychecks − all categories (incl. Investing & Savings). "
+                   "Liquid Saved = Investing + Savings. 401k Saved = employee 401K + employer match.")
+        pie = summary.drop(index=reports.TOTAL)
+        pie = pie[pie["Actual"] > 0].reset_index()
+        if not pie.empty:
+            fig = px.pie(pie, names="Category", values="Actual", hole=0.4, title="Spending by category")
+            fig.update_layout(showlegend=True, height=420, margin=dict(t=40, b=0))
+            st.plotly_chart(fig, width="stretch")
 
-    # ---- trends
-    st.subheader("Monthly trend")
-    allexp = tx[tx["kind"] == "expense"].copy()
-    allexp["category"] = allexp["category"].fillna("Uncategorized")
-    trend = allexp.groupby(["month", "category"], as_index=False)["amount"].sum()
-    cats_sel = st.multiselect("Categories", sorted(trend["category"].unique()),
-                              default=sorted(trend["category"].unique())[:5])
-    if cats_sel:
-        st.plotly_chart(
-            px.line(trend[trend["category"].isin(cats_sel)].sort_values("month"),
-                    x="month", y="amount", color="category", markers=True),
-            use_container_width=True,
-        )
-    tot = tx.groupby(["month", "kind"], as_index=False)["amount"].sum().sort_values("month")
-    st.plotly_chart(px.line(tot, x="month", y="amount", color="kind", markers=True,
-                            title="Income vs expenses"), use_container_width=True)
+    a, b = st.columns(2)
+    with a:
+        show_paycheck(paycheck_lines(months, "mid"), PERIOD_LABEL["mid"] + (f" ({len(months)} months)" if mode == "Year" else ""))
+    with b:
+        show_paycheck(paycheck_lines(months, "end"), PERIOD_LABEL["end"] + (f" ({len(months)} months)" if mode == "Year" else ""))
 
-    # ---- Sankey (year view always uses the chosen year)
-    st.subheader(f"Income → category flow — {year}")
-    yr = tx[tx["year"] == year].copy()
-    yr["category"] = yr["category"].fillna("Uncategorized")
-    yr_exp = yr[yr["kind"] == "expense"].groupby("category")["amount"].sum().sort_values(ascending=False)
-    yr_inc = yr[yr["kind"] == "income"]["amount"].sum()
-    if yr_exp.empty:
-        st.caption("No expenses to show.")
+    st.subheader(f"Budget vs actual — {label}")
+    bars = summary.drop(index=reports.TOTAL)
+    bars = bars[(bars["Budget"] != 0) | (bars["Actual"] != 0)]
+    figb = go.Figure()
+    figb.add_bar(name="Budget", x=bars.index, y=bars["Budget"])
+    figb.add_bar(name="Actual", x=bars.index, y=bars["Actual"])
+    figb.update_layout(barmode="group", height=380, margin=dict(t=20))
+    st.plotly_chart(figb, width="stretch")
+
+    st.subheader(f"Transactions — {label}")
+    if tx.empty:
+        st.caption("No transactions in this period. Use **Import CSV** to add some.")
     else:
-        total_exp = yr_exp.sum()
-        # Income node -> each category; leftover savings if income exceeds spending.
-        source_total = max(yr_inc, total_exp)
-        labels = [f"Income ({money(source_total)})"] + list(yr_exp.index)
-        sources = [0] * len(yr_exp)
-        targets = list(range(1, len(yr_exp) + 1))
-        values = list(yr_exp.values)
-        if yr_inc > total_exp:
-            labels.append("Savings")
-            sources.append(0)
-            targets.append(len(labels) - 1)
-            values.append(yr_inc - total_exp)
+        view = tx[["date", "bank", "description", "category", "amount", "effective", "shared"]].copy()
+        view["date"] = view["date"].dt.strftime("%Y-%m-%d")
+        view["shared"] = view["shared"].astype(bool)
+        st.dataframe(view.rename(columns={"effective": "my share"}), hide_index=True, width="stretch",
+                     column_config={"amount": st.column_config.NumberColumn(format="$%.2f"),
+                                    "my share": st.column_config.NumberColumn(format="$%.2f")})
+
+    # ---- trends (all data, share-adjusted)
+    st.subheader("Monthly trend")
+    allexp = db.fetch_expenses()
+    if allexp.empty:
+        st.caption("No transactions yet.")
+    else:
+        allexp["category"] = allexp["category"].fillna("Uncategorized")
+        trend = allexp.groupby(["month", "category"], as_index=False)["effective"].sum()
+        cats_all = [c for c in db.get_categories() if c in set(trend["category"])] + sorted(
+            set(trend["category"]) - set(db.get_categories()))
+        cats_sel = st.multiselect("Categories", cats_all, default=cats_all[:5])
+        if cats_sel:
+            st.plotly_chart(px.line(trend[trend["category"].isin(cats_sel)].sort_values("month"),
+                                    x="month", y="effective", color="category", markers=True,
+                                    labels={"effective": "my share ($)"}), width="stretch")
+        tm = sorted(allexp["month"].unique())
+        tot = pd.DataFrame({"month": tm,
+                            "Spent (my share)": allexp.groupby("month")["effective"].sum().reindex(tm).values,
+                            "Take-home": [reports.paycheck_summary([m])["take_home"] for m in tm]})
+        st.plotly_chart(px.line(tot.melt("month", var_name="series", value_name="amount"), x="month", y="amount",
+                                color="series", markers=True, title="Take-home vs spending"), width="stretch")
+
+    # ---- Sankey (always the chosen year)
+    st.subheader(f"Money flow — {year}")
+    sk = reports.sankey(year)
+    if not sk:
+        st.caption("No paycheck or spending data for this year.")
+    else:
         fig = go.Figure(go.Sankey(
-            node=dict(label=labels, pad=18, thickness=18),
-            link=dict(source=sources, target=targets, value=values),
+            node=dict(label=sk["labels"], pad=18, thickness=18),
+            link=dict(source=sk["source"], target=sk["target"], value=sk["value"]),
         ))
-        fig.update_layout(height=520, margin=dict(t=20))
-        st.plotly_chart(fig, use_container_width=True)
-        if yr_inc < total_exp:
-            st.caption("Spending exceeded recorded income this year; the source node shows total spending.")
+        fig.update_layout(height=560, margin=dict(t=20))
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Gross pay → taxes, other deductions, 401k and take-home; take-home → categories (my share) "
+                   "and whatever is left over.")
 
 
 # ============================================================ Budgets
 def page_budgets():
     st.title("Budgets")
-    cats = db.get_categories(kind="expense")
+    cats = db.get_categories()
     if not cats:
-        st.info("Add expense categories first (Categories & Model page).")
+        st.info("Add categories first (Categories & Model page).")
         return
 
-    today = date.today()
-    month = st.text_input("Month (YYYY-MM)", value=today.strftime("%Y-%m"))
+    month = st.text_input("Month (YYYY-MM)", value=THIS_MONTH)
     current = db.fetch_budgets(month)
     existing = dict(zip(current["category"], current["amount"]))
     if current.empty:
@@ -168,7 +210,8 @@ def page_budgets():
             existing = dict(zip(eff["category"], eff["amount"]))
 
     editor_df = pd.DataFrame({"category": cats, "amount": [float(existing.get(c, 0.0)) for c in cats]})
-    edited = st.data_editor(editor_df, hide_index=True, disabled=["category"], use_container_width=True,
+    edited = st.data_editor(editor_df, hide_index=True, disabled=["category"], width="stretch", key=f"bud_{month}",
+                            height=(len(cats) + 1) * 35 + 3,
                             column_config={"amount": st.column_config.NumberColumn(format="$%.2f", min_value=0.0)})
     st.metric("Total monthly budget", money(edited["amount"].sum()))
     if st.button("Save budget for this month", type="primary"):
@@ -184,15 +227,15 @@ def page_budgets():
         st.caption("Nothing saved yet.")
     else:
         pivot = hist.pivot(index="month", columns="category", values="amount").sort_index(ascending=False)
+        pivot = pivot[[c for c in cats if c in pivot.columns] + [c for c in pivot.columns if c not in cats]]
         pivot["TOTAL"] = pivot.sum(axis=1)
-        st.dataframe(pivot.style.format("${:,.2f}", na_rep="—"), use_container_width=True)
-        long = hist.copy()
-        sel = st.multiselect("Show categories", sorted(long["category"].unique()),
-                             default=sorted(long["category"].unique())[:5], key="bh")
+        st.dataframe(pivot.style.format(MONEY, na_rep="—"), width="stretch")
+        sel = st.multiselect("Show categories", [c for c in cats if c in set(hist["category"])],
+                             default=[c for c in cats if c in set(hist["category"])][:5], key="bh")
         if sel:
-            st.plotly_chart(px.line(long[long["category"].isin(sel)].sort_values("month"),
+            st.plotly_chart(px.line(hist[hist["category"].isin(sel)].sort_values("month"),
                                     x="month", y="amount", color="category", markers=True,
-                                    title="Budget amounts over time"), use_container_width=True)
+                                    title="Budget amounts over time"), width="stretch")
 
     with st.expander("Copy a month's budget forward"):
         a, b = st.columns(2)
@@ -203,97 +246,355 @@ def page_budgets():
             st.success(f"Copied {n} rows (existing rows in {dst} left untouched).")
 
 
+# ============================================================ Paychecks
+def page_paychecks():
+    st.title("Paychecks")
+    st.caption("Two paychecks per month. A month without saved paychecks uses the most recent earlier month.")
+    month = st.text_input("Month (YYYY-MM)", value=THIS_MONTH)
+    saved = db.fetch_paychecks(month)
+    lines = saved
+    if saved.empty:
+        lines = db.effective_paychecks(month)
+        if lines.empty:
+            st.warning("No paychecks saved yet.")
+            return
+        st.caption(f"No paychecks saved for {month}. Prefilled from {lines['month'].iloc[0]}.")
+
+    edited = {}
+    cols = st.columns(2)
+    for col, period in zip(cols, PAYCHECK_PERIODS):
+        with col:
+            st.subheader(PERIOD_LABEL[period])
+            p = lines[lines["period"] == period][["category", "subcategory", "amount"]].reset_index(drop=True)
+            e = st.data_editor(p, hide_index=True, disabled=["category", "subcategory"], width="stretch",
+                               key=f"pay_{month}_{period}", height=(len(p) + 1) * 35 + 3,
+                               column_config={"amount": st.column_config.NumberColumn(format="$%.2f", min_value=0.0)})
+            t = db.paycheck_totals(e)
+            st.metric("Total (take-home)", money(t["take_home"]))
+            st.caption(f"Gross {money(t['gross'])} − deductions {money(t['deductions'])}. "
+                       f"401k: {money(t['retirement'])} + employer match {money(t['employer_match'])} "
+                       f"({EMPLOYER_CATEGORY} lines are not part of take-home).")
+            edited[period] = e.assign(period=period)
+    both = sum(db.paycheck_totals(e)["take_home"] for e in edited.values())
+    st.metric("Take-home for the month", money(both))
+    if st.button("Save paychecks for this month", type="primary"):
+        db.save_paychecks(month, pd.concat(edited.values(), ignore_index=True))
+        st.success(f"Saved paychecks for {month}.")
+        st.rerun()
+
+    with st.expander("Copy a month's paychecks forward"):
+        a, b = st.columns(2)
+        src = a.text_input("From (YYYY-MM)", key="pay_src")
+        dst = b.text_input("To (YYYY-MM)", key="pay_dst")
+        if st.button("Copy", key="pay_copy") and src and dst:
+            n = db.copy_paychecks_forward(src, dst)
+            st.success(f"Copied {n} lines (existing lines in {dst} left untouched).")
+
+
+# ============================================================ Shared expenses
+def page_shared():
+    st.title("Shared expenses")
+    st.caption(f"Mark transactions you split with your roommate. Shared rows count at {SHARED_SPLIT:.0%} in your "
+               f"budget; your roommate owes the other {1 - SHARED_SPLIT:.0%}. Nothing is marked automatically.")
+    month = st.selectbox("Month", month_options())
+
+    tx = reports.expenses_for([month])
+    st.subheader(f"Transactions — {month}")
+    if tx.empty:
+        st.info("No transactions this month.")
+    else:
+        f1, f2, f3, f4 = st.columns([2, 2, 2, 1])
+        cat_f = f1.multiselect("Category", [c for c in db.get_categories() if c in set(tx["category"])]
+                               + sorted(set(tx["category"]) - set(db.get_categories())))
+        bank_f = f2.multiselect("Bank", sorted(tx["bank"].dropna().unique()))
+        text_f = f3.text_input("Search description")
+        only_shared = f4.checkbox("Shared only")
+        view = tx
+        if cat_f:
+            view = view[view["category"].isin(cat_f)]
+        if bank_f:
+            view = view[view["bank"].isin(bank_f)]
+        if text_f:
+            view = view[view["description"].str.contains(text_f, case=False, na=False)]
+        if only_shared:
+            view = view[view["shared"] == 1]
+
+        hints = reports.shared_merchant_hints()
+        select_all = st.checkbox(f"Select all {len(view)} shown")
+        ed = pd.DataFrame({
+            "Select": select_all,
+            "Shared": view["shared"].astype(bool).values,
+            "Date": view["date"].dt.strftime("%Y-%m-%d").values,
+            "Bank": view["bank"].values,
+            "Description": view["description"].values,
+            "Category": view["category"].values,
+            "Amount": view["amount"].values,
+            "My share": view["effective"].values,
+            "Settled": view["shared_settled"].astype(bool).values,
+            "Hint": ["shared before" if classifier.clean(d) in hints and not s else ""
+                     for d, s in zip(view["description"], view["shared"])],
+        }, index=view["id"].values)
+        key = f"shared_{month}_{hash((tuple(cat_f), tuple(bank_f), text_f, only_shared, select_all))}"
+        out = st.data_editor(
+            ed, key=key, width="stretch", hide_index=True,
+            disabled=["Date", "Bank", "Description", "Category", "Amount", "My share", "Settled", "Hint"],
+            column_config={"Amount": st.column_config.NumberColumn(format="$%.2f"),
+                           "My share": st.column_config.NumberColumn(format="$%.2f"),
+                           "Hint": st.column_config.TextColumn(help="Merchant was marked shared in another month. "
+                                                                    "Just a hint — nothing is changed.")})
+        sel = out.index[out["Select"]].tolist()
+        b1, b2, b3, b4, b5 = st.columns(5)
+        if b1.button("Save Shared checkboxes", type="primary"):
+            changed = out["Shared"] != ed["Shared"]
+            db.set_shared(out.index[changed & out["Shared"]], True)
+            db.set_shared(out.index[changed & ~out["Shared"]], False)
+            st.rerun()
+        if b2.button(f"Mark {len(sel)} selected shared", disabled=not sel):
+            db.set_shared(sel, True)
+            st.rerun()
+        if b3.button(f"Unmark {len(sel)} selected", disabled=not sel):
+            db.set_shared(sel, False)
+            st.rerun()
+        if b4.button("Settle selected", disabled=not sel):
+            db.set_settled(sel, True)
+            st.rerun()
+        if b5.button("Unsettle selected", disabled=not sel):
+            db.set_settled(sel, False)
+            st.rerun()
+        st.caption("Settling only applies to rows already marked shared (save checkboxes first).")
+
+    st.divider()
+    st.subheader("What my roommate owes")
+    total_owed = reports.still_owed()
+    view_mode = st.radio("View", ["Month", "Year"], horizontal=True, key="rm_view")
+    fmt = {c: MONEY for c in ["Shared total", "Roommate owes", "Settled", "Still owed", "Running still owed"]}
+
+    if view_mode == "Month":
+        table = reports.roommate_by_category(month)
+        m1, m2, m3 = st.columns(3)
+        m1.metric(f"Still owed for {month}", money(table.loc[reports.TOTAL, "Still owed"]))
+        m2.metric("Carried from earlier months", money(reports.still_owed(before=month)))
+        m3.metric("Total still owed by roommate across all months", money(total_owed))
+        st.dataframe(table.style.format(fmt).apply(bold_total, axis=1), width="stretch")
+
+        items = reports.itemized(month)
+        if items.empty:
+            st.caption("No shared transactions this month.")
+            return
+        for cat in table.drop(index=reports.TOTAL).index:
+            rows = items[items["category"] == cat]
+            with st.expander(f"{cat} — {len(rows)} item(s), roommate owes {money(rows['roommate'].sum())}"):
+                st.dataframe(rows.drop(columns=["id", "category"]).rename(columns={"roommate": "roommate's half"}),
+                             hide_index=True, width="stretch",
+                             column_config={"amount": st.column_config.NumberColumn("full amount", format="$%.2f"),
+                                            "roommate's half": st.column_config.NumberColumn(format="$%.2f")})
+
+        s1, s2, s3 = st.columns([2, 1, 1])
+        settle_cat = s1.selectbox("Category to settle", table.drop(index=reports.TOTAL).index, key="settle_cat")
+        if s2.button("Mark category settled"):
+            n = db.set_settled(items.loc[(items["category"] == settle_cat) & ~items["settled"], "id"], True)
+            st.success(f"Settled {n} row(s).")
+            st.rerun()
+        if s3.button("Mark whole month settled"):
+            n = db.set_settled(items.loc[~items["settled"], "id"], True)
+            st.success(f"Settled {n} row(s).")
+            st.rerun()
+
+        c1, c2 = st.columns(2)
+        if c1.button("Copy request message"):
+            st.session_state["rm_msg"] = reports.request_message(month)
+        c2.download_button("Download itemized CSV", items.drop(columns=["id"]).to_csv(index=False),
+                           file_name=f"shared-expenses-{month}.csv", mime="text/csv")
+        if st.session_state.get("rm_msg"):
+            st.code(st.session_state["rm_msg"], language=None)
+            st.caption("Use the copy icon in the box's corner, then paste into Venmo or a text.")
+    else:
+        years = sorted({int(m[:4]) for m in month_options()}, reverse=True)
+        year = st.selectbox("Year", years, key="rm_year")
+        st.metric("Total still owed by roommate across all months", money(total_owed))
+        by_month = reports.roommate_by_month(year)
+        st.dataframe(by_month.style.format(fmt), width="stretch")
+        st.caption("Running still owed carries unsettled balances forward, including from earlier years.")
+        breakdown = reports.roommate_year_breakdown(year)
+        if not breakdown.empty:
+            st.markdown("**By category, month by month**")
+            st.dataframe(breakdown.style.format(fmt), hide_index=True, width="stretch")
+
+
 # ============================================================ Import
 def page_import():
     st.title("Import CSV")
-    st.caption("Duplicates are checked against your database *and* within the file before anything is saved.")
-    f = st.file_uploader("CSV file", type=["csv"])
+    st.caption("Required columns: date, description and amount (or separate Debit/Credit). Duplicates are checked "
+               "against your database and within the file before anything is saved.")
+    f = st.file_uploader("CSV file (bank export, or the Transactions table exported from Numbers)", type=["csv"])
     if not f:
         return
+    file_key = f"{f.name}-{f.size}"
+    if st.session_state.get("imp_file") != file_key:
+        for k in ("imp_clean", "imp_dups", "imp_transfers", "rm_msg"):
+            st.session_state.pop(k, None)
+        st.session_state["imp_file"] = file_key
 
     raw = importer.read_csv(f)
     st.write("Preview", raw.head())
-    guess = importer.guess_mapping(list(raw.columns))
-    opts = ["(none)"] + list(raw.columns)
+    cols = list(raw.columns)
+    guess = importer.guess_mapping(cols)
 
-    def sel(label, key, required=False):
-        default = opts.index(guess[key]) if guess.get(key) in opts else 0
-        v = st.selectbox(label, opts, index=default, key=f"map_{key}")
+    # ---- bank confirmation
+    banks = db.get_banks()
+    auto_bank, why = importer.guess_bank(f.name, raw, guess)
+    bank = st.selectbox("Bank — applies to every row", banks, index=banks.index(auto_bank) if auto_bank else None,
+                        placeholder="Choose…", key=f"bank_{file_key}")
+    st.caption(f"Pre-selected from: {why}." if auto_bank else "Couldn't detect the bank — please choose.")
+    if not bank:
+        return
+    settings = db.get_bank(bank)
+    saved = settings["mapping"] if importer.saved_mapping_fits(settings["mapping"], cols) else {}
+    defaults = {k: saved.get(k) or (guess.get(k) if not saved else None) for k in importer.FIELDS}
+    if saved and not saved.get("bank") and guess.get("bank"):
+        defaults["bank"] = guess["bank"]
+    if saved:
+        st.caption(f"Using the saved column mapping for {bank}.")
+
+    # ---- column mapping (keyed by bank so switching bank reloads its defaults)
+    opts = ["(none)"] + cols
+
+    def sel(container, label, key):
+        default = opts.index(defaults[key]) if defaults.get(key) in opts else 0
+        v = container.selectbox(label, opts, index=default, key=f"map_{file_key}_{bank}_{key}")
         return None if v == "(none)" else v
 
+    split_default = bool(defaults.get("debit") and defaults.get("credit") and not defaults.get("amount"))
+    layout = st.radio("Amount layout", ["One amount column", "Separate Debit and Credit columns"],
+                      index=1 if split_default else 0, horizontal=True, key=f"layout_{file_key}_{bank}")
     c = st.columns(5)
-    with c[0]:
-        m_date = sel("Date column", "date")
-    with c[1]:
-        m_desc = sel("Description column", "description")
-    with c[2]:
-        m_amt = sel("Amount column", "amount")
-    with c[3]:
-        m_cat = sel("Category column (optional)", "category")
-    with c[4]:
-        m_acct = sel("Account column (optional)", "account")
-    invert = st.checkbox("My bank exports spending as negative numbers", value=False)
+    m = {"date": sel(c[0], "Date column", "date"), "description": sel(c[1], "Description column", "description")}
+    if layout.startswith("One"):
+        m["amount"] = sel(c[2], "Amount column", "amount")
+        charges_negative = st.checkbox(f"{bank} exports charges as negative numbers",
+                                       value=settings["charges_negative"], key=f"neg_{file_key}_{bank}")
+    else:
+        m["debit"] = sel(c[2], "Debit column (charges)", "debit")
+        m["credit"] = sel(c[2], "Credit column (refunds/payments)", "credit")
+        charges_negative = False
+        st.caption("Amount = Debit − Credit, so charges are positive and refunds negative.")
+    m["category"] = sel(c[3], "Category column (optional)", "category")
+    m["bank"] = sel(c[4], "Bank column (optional)", "bank")
+    if m["bank"]:
+        st.info(f"The file has a Bank column: each row uses its own value. Blank or unknown values "
+                f"(anything not in {', '.join(banks)}) fall back to {bank}.")
+    remember = st.checkbox(f"Remember this mapping and sign convention for {bank}", value=not saved,
+                           key=f"remember_{file_key}_{bank}")
     use_llm = st.checkbox("Use LM Studio fallback", value=True)
 
-    if not (m_date and m_desc and m_amt):
-        st.warning("Pick date, description and amount columns.")
+    amount_ok = m.get("amount") or (m.get("debit") and m.get("credit"))
+    if not (m["date"] and m["description"] and amount_ok):
+        st.warning("Pick date, description and amount (or debit + credit) columns.")
         return
 
     if st.button("Analyze file"):
-        clean = importer.normalize(raw, {"date": m_date, "description": m_desc, "amount": m_amt,
-                                         "category": m_cat, "account": m_acct}, invert_sign=invert)
+        if remember:
+            db.save_bank(bank, m, charges_negative)
+        clean = importer.normalize(raw, m, bank=bank, charges_negative=charges_negative)
         st.session_state["imp_clean"] = clean
         st.session_state["imp_dups"] = importer.find_duplicates(clean)
+        st.session_state["imp_transfers"] = importer.flag_transfers(clean)
         st.session_state["imp_llm"] = use_llm
 
     clean = st.session_state.get("imp_clean")
     if clean is None:
         return
-    dups = st.session_state["imp_dups"]
-    st.success(f"{len(clean)} valid rows; {len(dups)} possible duplicate(s).")
+    dups, transfers = st.session_state["imp_dups"], st.session_state["imp_transfers"]
+    missing = clean.index[clean["date_missing"] == 1].tolist()
+    st.success(f"{len(clean)} rows · {len(dups)} possible duplicate(s) · {len(transfers)} payment/transfer(s) · "
+               f"{len(missing)} missing date(s) · banks: {clean['bank'].value_counts().to_dict()}")
 
+    bad_bank = clean[clean["bank_invalid"] == 1]
+    if m.get("bank") and not bad_bank.empty:
+        st.warning(f"{len(bad_bank)} row(s) had a blank or unknown Bank value and will use {bank}.")
+    unknown = clean.loc[clean["category"].isna() & (clean["category_raw"] != ""), "category_raw"].unique()
+    if len(unknown):
+        st.info(f"Category values that aren't budget categories go through the ML → LLM → review cascade: "
+                f"{', '.join(map(str, unknown[:15]))}{'…' if len(unknown) > 15 else ''}")
+
+    # ---- blank dates: fix before import
+    fixes: dict[int, str] = {}
+    exclude_undated = False
+    if missing:
+        st.subheader("Rows missing a date — fill them in")
+        fix_df = pd.DataFrame({"date": pd.Series([pd.NaT] * len(missing), index=missing, dtype="datetime64[ns]"),
+                               "original": clean.loc[missing, "date_raw"].values,
+                               "description": clean.loc[missing, "description"].values,
+                               "amount": clean.loc[missing, "amount"].values}, index=missing)
+        fixed = st.data_editor(fix_df, key=f"datefix_{file_key}", disabled=["original", "description", "amount"],
+                               width="stretch", column_config={"date": st.column_config.DateColumn(format="YYYY-MM-DD")})
+        fixes = {i: pd.Timestamp(d).strftime("%Y-%m-%d") for i, d in fixed["date"].items() if pd.notna(d)}
+        exclude_undated = st.checkbox("Leave out rows I haven't dated yet", value=False)
+
+    # ---- card payments / transfers
     decisions: dict[int, str] = {}
+    transfer_skip: set[int] = set()
+    if transfers:
+        st.subheader("Likely card payments / transfers")
+        st.caption("These usually double-count against the card purchases they pay off. "
+                   "Investing / Savings transfers are not flagged; they map to those categories.")
+        t_bulk = st.radio("Default", ["Skip them", "Import anyway"], horizontal=True, key="tr_bulk")
+        for i in transfers:
+            r = clean.loc[i]
+            a, b = st.columns([3, 2])
+            a.markdown(f"{r['date'] or '(no date)'} · {r['bank']} · **{r['description']}** · {money(r['amount'])}")
+            ch = b.radio("Action", ["Skip", "Import"], index=0 if t_bulk == "Skip them" else 1, key=f"tr_{i}",
+                         horizontal=True, label_visibility="collapsed")
+            if ch == "Skip":
+                transfer_skip.add(i)
+
+    # ---- duplicates
     if dups:
         st.subheader("Possible duplicates — choose what to do")
         bulk = st.radio("Default for all", ["Skip duplicates", "Import anyway"], horizontal=True)
         for d in dups:
             i = d["new_idx"]
             row = clean.loc[i]
-            m = d["match"]
+            mt = d["match"]
             with st.container(border=True):
                 a, b = st.columns(2)
-                a.markdown(f"**New:** {row['date']} · {row['description']} · {money(row['amount'])}")
-                b.markdown(f"**{'Already in DB' if d['match_source']=='db' else 'Earlier in this file'}:** "
-                           f"{m['date']} · {m['description']} · {money(m['amount'])}")
+                a.markdown(f"**New:** {row['date']} · {row['bank']} · {row['description']} · {money(row['amount'])}")
+                b.markdown(f"**{'Already in DB' if d['match_source'] == 'db' else 'Earlier in this file'}:** "
+                           f"{mt['date']} · {mt['bank'] or '—'} · {mt['description']} · {money(mt['amount'])}")
                 st.caption(f"similarity {d['score']:.0%}" + (" · exact match" if d["exact"] else ""))
                 choice = st.radio("Action", ["Skip duplicates", "Import anyway"],
                                   index=0 if bulk == "Skip duplicates" else 1,
                                   key=f"dup_{i}", horizontal=True, label_visibility="collapsed")
                 decisions[i] = "skip" if choice.startswith("Skip") else "import"
 
-    if st.button("Categorize & import", type="primary"):
-        skip = {i for i, d in decisions.items() if d == "skip"}
-        keep = clean.drop(index=list(skip))
+    still_missing = [i for i in missing if i not in fixes]
+    blocked = bool(still_missing) and not exclude_undated
+    if blocked:
+        st.warning(f"{len(still_missing)} row(s) still need a date (or tick “Leave out rows I haven't dated yet”).")
+    if st.button("Categorize & import", type="primary", disabled=blocked):
+        skip = {i for i, d in decisions.items() if d == "skip"} | transfer_skip
+        if exclude_undated:
+            skip |= set(still_missing)
+        keep = clean.drop(index=list(skip)).copy()
+        for i, d in fixes.items():
+            if i in keep.index:
+                keep.at[i, "date"] = d
         with st.spinner("Categorizing…"):
             done = pipeline.categorize_frame(keep, use_llm=st.session_state["imp_llm"])
         batch = f"{date.today().isoformat()}-{uuid.uuid4().hex[:6]}"
-        # make sure any imported category names exist
-        for cat in done["category"].dropna().unique():
-            if cat not in db.get_categories(active_only=False):
-                db.add_category(cat)
         n = db.insert_transactions(done.to_dict("records"), batch)
-        # log decisions for audit
         with db.connect() as con:
             for d in dups:
                 r = clean.loc[d["new_idx"]]
-                con.execute("INSERT INTO dedupe_decisions(new_desc,new_date,new_amount,existing_id,decision) VALUES(?,?,?,?,?)",
-                            (r["description"], r["date"], r["amount"],
+                con.execute("INSERT INTO dedupe_decisions(new_desc,new_date,new_amount,new_bank,existing_id,decision) "
+                            "VALUES(?,?,?,?,?,?)",
+                            (r["description"], r["date"], r["amount"], r["bank"],
                              d["match"]["ref"] if d["match_source"] == "db" else None,
                              decisions.get(d["new_idx"])))
         st.success(f"Imported {n} rows ({len(skip)} skipped). "
                    f"Sources: {done['cat_source'].value_counts(dropna=False).to_dict()}. "
                    f"{int(done['needs_review'].sum())} need review.")
-        for k in ("imp_clean", "imp_dups"):
+        for k in ("imp_clean", "imp_dups", "imp_transfers"):
             st.session_state.pop(k, None)
 
 
@@ -304,12 +605,12 @@ def page_review():
     if qd.empty:
         st.success("Nothing to review 🎉")
         return
-    cats = db.get_categories(kind="expense") + db.get_categories(kind="income")
+    cats = db.get_categories()
     st.caption(f"{len(qd)} item(s). Labels you confirm here become training data.")
     for _, r in qd.iterrows():
         with st.container(border=True):
             a, b, c, d = st.columns([4, 2, 3, 1])
-            a.markdown(f"**{r['description']}**  \n{r['date']} · {money(r['amount'])}")
+            a.markdown(f"**{r['description']}**  \n{r['date']} · {r['bank'] or '—'} · {money(r['amount'])}")
             guess = r["category"] if r["category"] in cats else None
             b.caption(f"Best guess: {guess or '—'}" + (f" ({r['cat_confidence']:.0%})" if pd.notna(r["cat_confidence"]) else ""))
             choice = c.selectbox("Category", cats, index=cats.index(guess) if guess else None,
@@ -328,20 +629,29 @@ def page_transactions():
         st.info("No data.")
         return
     cats = db.get_categories()
-    f1, f2, f3 = st.columns(3)
+    f1, f2, f3, f4 = st.columns(4)
     cat = f1.selectbox("Category", ["All", "Uncategorized"] + cats)
-    text = f2.text_input("Search description")
-    src = f3.selectbox("Source", ["All", "ml", "llm", "manual", "import"])
+    bank = f2.selectbox("Bank", ["All", "(none)"] + db.get_banks())
+    text = f3.text_input("Search description")
+    src = f4.selectbox("Source", ["All", "ml", "llm", "manual", "import", "rule"])
     if cat == "Uncategorized":
         tx = tx[tx["category"].isna()]
     elif cat != "All":
         tx = tx[tx["category"] == cat]
+    if bank == "(none)":
+        tx = tx[tx["bank"].isna() | (tx["bank"] == "")]
+    elif bank != "All":
+        tx = tx[tx["bank"] == bank]
     if text:
         tx = tx[tx["description"].str.contains(text, case=False, na=False)]
     if src != "All":
         tx = tx[tx["cat_source"] == src]
-    st.dataframe(tx[["id", "date", "description", "amount", "kind", "category", "cat_source", "cat_confidence", "account"]],
-                 hide_index=True, use_container_width=True)
+    tx = tx.assign(effective=db.effective_amount(tx))
+    st.dataframe(tx[["id", "date", "bank", "description", "category", "amount", "effective", "shared", "shared_settled",
+                     "cat_source", "cat_confidence", "kind"]].rename(columns={"effective": "my share"}),
+                 hide_index=True, width="stretch")
+    if (tx["kind"] == "income").any():
+        st.caption("Rows with kind = income were imported before paychecks existed; they are excluded from budgets.")
     with st.expander("Edit one transaction"):
         tid = st.number_input("Transaction id", min_value=0, step=1)
         newcat = st.selectbox("New category", cats, index=None, placeholder="Choose…")
@@ -360,16 +670,24 @@ def page_model():
     left, right = st.columns(2)
     with left:
         st.subheader("Categories")
-        with db.connect() as con:
-            cats = pd.read_sql_query("SELECT name, kind, active FROM categories ORDER BY name", con)
-        st.dataframe(cats, hide_index=True, use_container_width=True)
+        cats = db.category_table()
+        cats["is_savings"] = cats["is_savings"].astype(bool)
+        cats["active"] = cats["active"].astype(bool)
+        edited = st.data_editor(cats, hide_index=True, width="stretch", disabled=["name", "kind", "active"],
+                                key="cat_editor",
+                                column_config={"is_savings": st.column_config.CheckboxColumn(
+                                    "savings", help="Counts toward Liquid Saved (e.g. Investing, Savings)")})
+        if st.button("Save savings flags"):
+            for _, r in edited[edited["is_savings"] != cats["is_savings"]].iterrows():
+                db.set_category_savings(r["name"], bool(r["is_savings"]))
+            st.rerun()
         with st.form("addcat", clear_on_submit=True):
             n = st.text_input("New category")
-            k = st.selectbox("Kind", ["expense", "income"])
+            sv = st.checkbox("Savings category")
             if st.form_submit_button("Add") and n.strip():
-                db.add_category(n.strip(), k)
+                db.add_category(n.strip(), "expense", sv)
                 st.rerun()
-        names = db.get_categories(active_only=False)
+        names = db.get_categories(kind=None, active_only=False)
         if names:
             with st.form("rencat"):
                 old = st.selectbox("Rename", names)
@@ -380,6 +698,33 @@ def page_model():
             dis = st.selectbox("Retire a category (kept on old transactions)", [""] + db.get_categories())
             if dis and st.button("Retire"):
                 db.deactivate_category(dis)
+                st.rerun()
+
+        st.subheader("Banks")
+        st.caption("Saved CSV column mapping and sign convention per bank, used to pre-fill the Import page.")
+        bank = st.selectbox("Bank", db.get_banks())
+        b = db.get_bank(bank)
+        with st.form(f"bank_{bank}"):
+            mp = b["mapping"]
+            split = st.checkbox("Separate Debit and Credit columns", value=bool(mp.get("debit")))
+            vals = {}
+            for k, label in [("date", "Date column"), ("description", "Description column"),
+                             ("amount", "Amount column (one-column layout)"), ("debit", "Debit column"),
+                             ("credit", "Credit column"), ("category", "Category column"), ("bank", "Bank column")]:
+                vals[k] = st.text_input(label, value=mp.get(k) or "").strip() or None
+            neg = st.checkbox("Charges are exported as negative numbers (one-column layout)",
+                              value=b["charges_negative"])
+            if st.form_submit_button("Save bank settings"):
+                if split:
+                    vals["amount"] = None
+                else:
+                    vals["debit"] = vals["credit"] = None
+                db.save_bank(bank, vals, neg and not split)
+                st.success(f"Saved {bank}.")
+        with st.form("addbank", clear_on_submit=True):
+            nb = st.text_input("Add a bank (name)")
+            if st.form_submit_button("Add bank") and nb.strip():
+                db.save_bank(nb, {}, False)
                 st.rerun()
     with right:
         st.subheader("Classifier")
@@ -399,7 +744,7 @@ def page_model():
         if st.button("Re-run categorizer on all uncategorized / flagged rows"):
             with db.connect() as con:
                 rows = pd.read_sql_query(
-                    "SELECT * FROM transactions WHERE category IS NULL OR needs_review=1", con)
+                    "SELECT * FROM transactions WHERE kind='expense' AND (category IS NULL OR needs_review=1)", con)
             if rows.empty:
                 st.info("Nothing to redo.")
             else:
@@ -416,6 +761,8 @@ def page_model():
 {
     "Dashboard": page_dashboard,
     "Budgets": page_budgets,
+    "Paychecks": page_paychecks,
+    "Shared expenses": page_shared,
     "Import CSV": page_import,
     "Review queue": page_review,
     "Transactions": page_transactions,

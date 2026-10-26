@@ -1,15 +1,25 @@
-"""SQLite data layer."""
+"""SQLite data layer.
+
+Schema changes go through MIGRATIONS, tracked with PRAGMA user_version, so an existing
+finance.db upgrades in place. Before upgrading a database that already holds tables, a
+backup copy is written next to it.
+"""
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import date
 from typing import Iterable
 
+import numpy as np
 import pandas as pd
 
-from config import DB_PATH
+import config
+from config import DB_PATH, SHARED_SPLIT
 
-SCHEMA = """
+# Version 1: the original schema (databases created before migrations existed report user_version 0).
+SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS categories (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     name      TEXT NOT NULL UNIQUE,
@@ -21,11 +31,11 @@ CREATE TABLE IF NOT EXISTS transactions (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     date           TEXT NOT NULL,              -- ISO yyyy-mm-dd
     description    TEXT NOT NULL,
-    amount         REAL NOT NULL,              -- positive = money spent / negative = refund; income uses kind
+    amount         REAL NOT NULL,              -- positive = money spent / negative = refund
     kind           TEXT NOT NULL DEFAULT 'expense' CHECK (kind IN ('expense','income')),
-    account        TEXT DEFAULT '',
+    account        TEXT DEFAULT '',            -- legacy, superseded by bank
     category       TEXT,                       -- NULL until categorized
-    cat_source     TEXT,                       -- 'ml' | 'llm' | 'manual' | 'import'
+    cat_source     TEXT,                       -- 'ml' | 'llm' | 'manual' | 'import' | 'rule'
     cat_confidence REAL,
     needs_review   INTEGER NOT NULL DEFAULT 0,
     import_batch   TEXT,
@@ -52,6 +62,79 @@ CREATE TABLE IF NOT EXISTS dedupe_decisions (
 """
 
 
+def _columns(c: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+
+
+def _add_column(c: sqlite3.Connection, table: str, col: str, ddl: str) -> None:
+    if col not in _columns(c, table):
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+
+
+def _migrate_v1(c: sqlite3.Connection) -> None:
+    for stmt in SCHEMA_V1.split(";"):
+        if stmt.strip():
+            c.execute(stmt)
+
+
+def _migrate_v2(c: sqlite3.Connection) -> None:
+    """Banks, budget categories with is_savings, shared expenses, paychecks."""
+    _add_column(c, "categories", "is_savings", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(c, "categories", "sort_order", "INTEGER NOT NULL DEFAULT 1000")
+    _add_column(c, "transactions", "bank", "TEXT")
+    _add_column(c, "transactions", "shared", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(c, "transactions", "shared_settled", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(c, "transactions", "shared_settled_date", "TEXT")
+    _add_column(c, "dedupe_decisions", "new_bank", "TEXT")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_tx_bank ON transactions(bank)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_tx_shared ON transactions(shared)")
+    c.execute("""CREATE TABLE IF NOT EXISTS banks (
+        name             TEXT PRIMARY KEY,
+        sort_order       INTEGER NOT NULL DEFAULT 1000,
+        mapping          TEXT NOT NULL DEFAULT '{}',   -- JSON: field -> CSV column
+        charges_negative INTEGER NOT NULL DEFAULT 0
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS paychecks (
+        month       TEXT NOT NULL,                     -- yyyy-mm
+        period      TEXT NOT NULL CHECK (period IN ('mid','end')),
+        category    TEXT NOT NULL,
+        subcategory TEXT NOT NULL,
+        amount      REAL NOT NULL,
+        sort_order  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (month, period, category, subcategory)
+    )""")
+
+    for i, b in enumerate(config.DEFAULT_BANKS):
+        c.execute("INSERT OR IGNORE INTO banks(name, sort_order, mapping, charges_negative) VALUES(?,?,?,?)",
+                  (b["name"], i, json.dumps(b["mapping"]), b["charges_negative"]))
+    # Old free-text account values that name one of the banks become the bank.
+    names = [b["name"] for b in config.DEFAULT_BANKS]
+    c.execute(f"UPDATE transactions SET bank=UPPER(TRIM(account)) WHERE bank IS NULL "
+              f"AND UPPER(TRIM(account)) IN ({','.join('?' * len(names))})", names)
+
+    for i, name in enumerate(config.DEFAULT_CATEGORIES):
+        c.execute(
+            "INSERT INTO categories(name, kind, active, is_savings, sort_order) VALUES(?, 'expense', 1, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET active=1, kind='expense', is_savings=excluded.is_savings, "
+            "sort_order=excluded.sort_order",
+            (name, int(name in config.SAVINGS_CATEGORIES), i),
+        )
+
+    month = date.today().strftime("%Y-%m")
+    if not c.execute("SELECT 1 FROM budgets WHERE month=?", (month,)).fetchone():
+        for name in config.DEFAULT_CATEGORIES:
+            c.execute("INSERT INTO budgets(month, category, amount) VALUES(?,?,?)",
+                      (month, name, float(config.DEFAULT_BUDGET.get(name, 0.0))))
+    if not c.execute("SELECT 1 FROM paychecks").fetchone():
+        for period in config.PAYCHECK_PERIODS:
+            for i, (cat, sub, amt) in enumerate(config.DEFAULT_PAYCHECK):
+                c.execute("INSERT INTO paychecks VALUES(?,?,?,?,?,?)", (month, period, cat, sub, amt, i))
+
+
+MIGRATIONS = [_migrate_v1, _migrate_v2]   # index + 1 == version reached after running it
+SCHEMA_VERSION = len(MIGRATIONS)
+
+
 @contextmanager
 def connect():
     conn = sqlite3.connect(DB_PATH)
@@ -64,13 +147,39 @@ def connect():
         conn.close()
 
 
-def init_db() -> None:
+def schema_version() -> int:
     with connect() as c:
-        c.executescript(SCHEMA)
+        return c.execute("PRAGMA user_version").fetchone()[0]
+
+
+def init_db() -> None:
+    """Create or upgrade the database. Each migration runs in its own transaction."""
+    conn = sqlite3.connect(DB_PATH, isolation_level=None)
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        has_tables = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone()
+        if version == 0 and has_tables:
+            version = 1   # pre-migration database: already on the original schema
+        if version < SCHEMA_VERSION and has_tables:
+            backup_path = DB_PATH.with_name(f"{DB_PATH.stem}.pre-v{SCHEMA_VERSION}-backup.db")
+            if not backup_path.exists():
+                with sqlite3.connect(backup_path) as dst:
+                    conn.backup(dst)
+        for v in range(version, SCHEMA_VERSION):
+            conn.execute("BEGIN")
+            try:
+                MIGRATIONS[v](conn)
+                conn.execute(f"PRAGMA user_version = {v + 1}")
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+    finally:
+        conn.close()
 
 
 # ---------- categories ----------
-def get_categories(kind: str | None = None, active_only: bool = True) -> list[str]:
+def get_categories(kind: str | None = "expense", active_only: bool = True) -> list[str]:
     q = "SELECT name FROM categories WHERE 1=1"
     params: list = []
     if active_only:
@@ -78,18 +187,35 @@ def get_categories(kind: str | None = None, active_only: bool = True) -> list[st
     if kind:
         q += " AND kind=?"
         params.append(kind)
-    q += " ORDER BY name"
+    q += " ORDER BY sort_order, name"
     with connect() as c:
         return [r["name"] for r in c.execute(q, params)]
 
 
-def add_category(name: str, kind: str = "expense") -> None:
+def category_table() -> pd.DataFrame:
     with connect() as c:
+        return pd.read_sql_query(
+            "SELECT name, kind, active, is_savings FROM categories ORDER BY sort_order, name", c)
+
+
+def savings_categories() -> list[str]:
+    with connect() as c:
+        return [r["name"] for r in c.execute("SELECT name FROM categories WHERE is_savings=1 ORDER BY sort_order")]
+
+
+def add_category(name: str, kind: str = "expense", is_savings: bool = False) -> None:
+    with connect() as c:
+        nxt = c.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM categories WHERE sort_order < 1000").fetchone()[0]
         c.execute(
-            "INSERT INTO categories(name, kind, active) VALUES(?,?,1) "
+            "INSERT INTO categories(name, kind, active, is_savings, sort_order) VALUES(?,?,1,?,?) "
             "ON CONFLICT(name) DO UPDATE SET active=1, kind=excluded.kind",
-            (name.strip(), kind),
+            (name.strip(), kind, int(is_savings), nxt),
         )
+
+
+def set_category_savings(name: str, is_savings: bool) -> None:
+    with connect() as c:
+        c.execute("UPDATE categories SET is_savings=? WHERE name=?", (int(is_savings), name))
 
 
 def deactivate_category(name: str) -> None:
@@ -104,6 +230,31 @@ def rename_category(old: str, new: str) -> None:
         c.execute("UPDATE budgets SET category=? WHERE category=?", (new, old))
 
 
+# ---------- banks ----------
+def get_banks() -> list[str]:
+    with connect() as c:
+        return [r["name"] for r in c.execute("SELECT name FROM banks ORDER BY sort_order, name")]
+
+
+def get_bank(name: str) -> dict | None:
+    with connect() as c:
+        r = c.execute("SELECT * FROM banks WHERE name=?", (name,)).fetchone()
+    if not r:
+        return None
+    return {"name": r["name"], "mapping": json.loads(r["mapping"] or "{}"),
+            "charges_negative": bool(r["charges_negative"])}
+
+
+def save_bank(name: str, mapping: dict, charges_negative: bool) -> None:
+    clean = {k: v for k, v in mapping.items() if v}
+    with connect() as c:
+        c.execute(
+            "INSERT INTO banks(name, mapping, charges_negative) VALUES(?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET mapping=excluded.mapping, charges_negative=excluded.charges_negative",
+            (name.strip().upper(), json.dumps(clean), int(charges_negative)),
+        )
+
+
 # ---------- transactions ----------
 def insert_transactions(rows: Iterable[dict], batch: str) -> int:
     n = 0
@@ -111,13 +262,14 @@ def insert_transactions(rows: Iterable[dict], batch: str) -> int:
         for r in rows:
             c.execute(
                 """INSERT INTO transactions
-                   (date, description, amount, kind, account, category, cat_source,
-                    cat_confidence, needs_review, import_batch)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                   (date, bank, description, amount, kind, account, category, cat_source,
+                    cat_confidence, needs_review, import_batch, shared, shared_settled, shared_settled_date)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    r["date"], r["description"], float(r["amount"]), r.get("kind", "expense"),
+                    r["date"], r.get("bank"), r["description"], float(r["amount"]), r.get("kind", "expense"),
                     r.get("account", ""), r.get("category"), r.get("cat_source"),
                     r.get("cat_confidence"), int(r.get("needs_review", 0)), batch,
+                    int(r.get("shared", 0)), int(r.get("shared_settled", 0)), r.get("shared_settled_date"),
                 ),
             )
             n += 1
@@ -141,12 +293,53 @@ def fetch_transactions(start: str | None = None, end: str | None = None) -> pd.D
     return df
 
 
+def effective_amount(df: pd.DataFrame) -> pd.Series:
+    """The part of each transaction that is mine: SHARED_SPLIT of shared rows, all of the rest.
+
+    Every budget actual, leftover, savings figure and chart goes through this function.
+    """
+    if df.empty:
+        return pd.Series(dtype=float, index=df.index)
+    shared = df["shared"].fillna(0).astype(int) == 1 if "shared" in df else False
+    return df["amount"].astype(float) * np.where(shared, SHARED_SPLIT, 1.0)
+
+
+def roommate_amount(df: pd.DataFrame) -> pd.Series:
+    """What the roommate owes per row: the non-mine part of shared rows, 0 otherwise."""
+    return df["amount"].astype(float) - effective_amount(df)
+
+
+def month_bounds(month: str) -> tuple[str, str]:
+    return f"{month}-01", f"{month}-31"
+
+
+def fetch_expenses(start: str | None = None, end: str | None = None) -> pd.DataFrame:
+    """Expense transactions with an `effective` column (share-adjusted amount).
+
+    Legacy rows imported as kind='income' before paychecks existed are excluded.
+    """
+    tx = fetch_transactions(start, end)
+    if tx.empty:
+        tx["effective"] = pd.Series(dtype=float)
+        return tx
+    tx = tx[tx["kind"] == "expense"].copy()
+    tx["effective"] = effective_amount(tx)
+    tx["month"] = tx["date"].dt.strftime("%Y-%m")
+    return tx
+
+
+def transaction_months() -> list[str]:
+    with connect() as c:
+        return [r[0] for r in c.execute(
+            "SELECT DISTINCT substr(date, 1, 7) FROM transactions WHERE kind='expense' ORDER BY 1 DESC")]
+
+
 def fetch_labeled() -> pd.DataFrame:
-    """Rows usable as training data: manual labels and imported labels, plus confirmed ML/LLM rows."""
+    """Rows usable as training data: manual and imported labels only (never the model's own guesses)."""
     with connect() as c:
         return pd.read_sql_query(
             """SELECT description, category FROM transactions
-               WHERE category IS NOT NULL AND needs_review=0
+               WHERE category IS NOT NULL AND needs_review=0 AND kind='expense'
                  AND cat_source IN ('manual','import')""",
             c,
         )
@@ -167,9 +360,40 @@ def set_category(tx_id: int, category: str, source: str = "manual", confidence: 
         )
 
 
+def set_date(tx_id: int, iso_date: str) -> None:
+    with connect() as c:
+        c.execute("UPDATE transactions SET date=? WHERE id=?", (iso_date, tx_id))
+
+
 def delete_transaction(tx_id: int) -> None:
     with connect() as c:
         c.execute("DELETE FROM transactions WHERE id=?", (tx_id,))
+
+
+# ---------- shared expenses ----------
+def set_shared(ids: Iterable[int], shared: bool) -> None:
+    """Mark rows shared / not shared. Un-sharing a row also clears its settlement."""
+    ids = [int(i) for i in ids]
+    with connect() as c:
+        if shared:
+            c.executemany("UPDATE transactions SET shared=1 WHERE id=?", [(i,) for i in ids])
+        else:
+            c.executemany("UPDATE transactions SET shared=0, shared_settled=0, shared_settled_date=NULL WHERE id=?",
+                          [(i,) for i in ids])
+
+
+def set_settled(ids: Iterable[int], settled: bool = True, on: str | None = None) -> int:
+    """Mark shared rows settled (stamped with `on`, default today) or unsettled. Non-shared rows are ignored."""
+    on = on or date.today().isoformat()
+    n = 0
+    with connect() as c:
+        for i in ids:
+            cur = c.execute(
+                "UPDATE transactions SET shared_settled=?, shared_settled_date=? WHERE id=? AND shared=1",
+                (int(settled), on if settled else None, int(i)),
+            )
+            n += cur.rowcount
+    return n
 
 
 # ---------- budgets ----------
@@ -211,3 +435,57 @@ def effective_budget(month: str) -> pd.DataFrame:
     if not row or not row["m"]:
         return pd.DataFrame(columns=["month", "category", "amount"])
     return fetch_budgets(row["m"])
+
+
+# ---------- paychecks ----------
+def fetch_paychecks(month: str) -> pd.DataFrame:
+    with connect() as c:
+        return pd.read_sql_query(
+            "SELECT * FROM paychecks WHERE month=? ORDER BY period, sort_order", c, params=[month])
+
+
+def effective_paychecks(month: str) -> pd.DataFrame:
+    """Paychecks in force for `month`: that month's rows, else carried forward from the latest earlier month."""
+    with connect() as c:
+        row = c.execute("SELECT MAX(month) AS m FROM paychecks WHERE month<=?", (month,)).fetchone()
+    if not row or not row["m"]:
+        return pd.DataFrame(columns=["month", "period", "category", "subcategory", "amount", "sort_order"])
+    return fetch_paychecks(row["m"])
+
+
+def save_paychecks(month: str, lines: pd.DataFrame) -> None:
+    """Replace `month`'s paycheck lines with `lines` (columns: period, category, subcategory, amount)."""
+    with connect() as c:
+        c.execute("DELETE FROM paychecks WHERE month=?", (month,))
+        for period, grp in lines.groupby("period", sort=False):
+            for i, r in enumerate(grp.itertuples(index=False)):
+                c.execute("INSERT INTO paychecks VALUES(?,?,?,?,?,?)",
+                          (month, period, r.category, r.subcategory, float(r.amount), i))
+
+
+def copy_paychecks_forward(from_month: str, to_month: str) -> int:
+    with connect() as c:
+        return c.execute(
+            "INSERT OR IGNORE INTO paychecks SELECT ?, period, category, subcategory, amount, sort_order "
+            "FROM paychecks WHERE month=?", (to_month, from_month)).rowcount
+
+
+def paycheck_totals(lines: pd.DataFrame) -> dict:
+    """Break one paycheck's lines into gross / taxes / other deductions / 401k / employer match / take-home."""
+    cat, sub, amt = lines["category"], lines["subcategory"], lines["amount"].astype(float)
+    employer = cat == config.EMPLOYER_CATEGORY
+    income = cat == config.INCOME_CATEGORY
+    deductions = ~employer & ~income
+    retirement = deductions & (sub == config.RETIREMENT_SUBCATEGORY)
+    taxes = deductions & cat.isin(config.TAX_CATEGORIES)
+    gross = float(amt[income].sum())
+    total_ded = float(amt[deductions].sum())
+    return {
+        "gross": gross,
+        "taxes": float(amt[taxes].sum()),
+        "other": float(amt[deductions & ~taxes & ~retirement].sum()),
+        "retirement": float(amt[retirement].sum()),
+        "employer_match": float(amt[employer & (sub == config.EMPLOYER_MATCH_SUBCATEGORY)].sum()),
+        "deductions": total_ded,
+        "take_home": round(gross - total_ded, 2),
+    }

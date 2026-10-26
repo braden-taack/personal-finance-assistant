@@ -1,2 +1,4 @@
 # personal-finance-assistant
-Local-first personal finance tracker with ML + local-LLM expense categorization, duplicate-aware CSV import, monthly budgets, and a Streamlit dashboard.
+Finance Tracker is a privacy-focused personal finance app that runs entirely on your own machine. Import bank or credit card CSVs (including exports from Apple Numbers), and each expense is categorized by a cascade: a scikit-learn model first, then a local LLM served through LM Studio when the model is unsure, and finally a manual review queue for anything still uncertain. Your corrections feed back into the model, which you can retrain whenever your categories change.
+
+An import tool checks every row against your existing transactions and the file itself for likely duplicates, and asks whether to skip or keep each one. Everything is stored in SQLite, including budgets that can change month to month. A Streamlit dashboard shows totals by month or year, budget vs. actual spending, category pie charts, trend lines, and a year-end Sankey diagram of where your income went.

@@ -10,7 +10,7 @@ import db
 from config import (BANK_FILENAME_HINTS, DUP_DATE_WINDOW_DAYS, DUP_DESC_SIMILARITY, SAVINGS_TRANSFER_RULES,
                     TRANSFER_PATTERNS)
 
-FIELDS = ["date", "description", "amount", "debit", "credit", "category", "bank"]
+FIELDS = ["date", "description", "amount", "debit", "credit", "category", "bank", "shared"]
 
 
 def read_csv(file) -> pd.DataFrame:
@@ -39,6 +39,7 @@ def guess_mapping(columns: list[str]) -> dict:
         "credit": pick("credit"),
         "category": pick("category"),
         "bank": pick("bank"),
+        "shared": pick("shared"),
     }
     if m["amount"] and m["debit"] and m["credit"]:
         m["debit"] = m["credit"] = None   # prefer the single signed column when both exist
@@ -90,6 +91,7 @@ def normalize(df: pd.DataFrame, mapping: dict, bank: str, charges_negative: bool
     `bank` applies to every row unless the file has a mapped Bank column; per-row values are
     validated against the banks table and invalid/blank ones fall back to `bank` (bank_invalid=1).
     Rows with a blank or unreadable date are kept with date=None and date_missing=1.
+    An optional Shared column (1/yes/true/x) marks rows split 50/50 with the roommate.
     Category values are matched case-insensitively to known categories; unknown ones become None
     (original text kept in category_raw) so the cascade categorizes them.
     """
@@ -121,6 +123,10 @@ def normalize(df: pd.DataFrame, mapping: dict, bank: str, charges_negative: bool
         amt[debit.isna() & credit.isna()] = float("nan")
     out["amount"] = amt
     out["kind"] = "expense"
+    out["shared"] = 0
+    if mapping.get("shared") and mapping["shared"] in df:   # optional: rows split 50/50 with the roommate
+        flag = df[mapping["shared"]].astype(str).str.strip().str.lower()
+        out["shared"] = flag.isin(["1", "1.0", "true", "yes", "y", "x"]).astype(int)
 
     out["category"] = None
     out["category_raw"] = ""

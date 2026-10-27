@@ -84,16 +84,48 @@ def on_sheet_month(day: int, year: int, month: int) -> date:
     return date(year, month, min(day, calendar.monthrange(year, month)[1]))
 
 
-def table_dicts(table) -> list[dict]:
-    """Non-empty body rows as {header: value}, header names stripped."""
+def table_dicts(table, with_formulas: bool = False) -> list[dict]:
+    """Non-empty body rows as {header: value}, header names stripped.
+
+    with_formulas adds "_row" (the 1-based row number formulas use) and "_amount_formula".
+    """
     names = [str(table.cell(0, c).value or "").strip() for c in range(table.num_cols)]
+    amount_col = names.index("Amount") if "Amount" in names else None
     out = []
     for r in range(max(1, table.num_header_rows), table.num_rows):
         vals = [table.cell(r, c).value for c in range(table.num_cols)]
         if all(v is None or (isinstance(v, str) and not v.strip()) for v in vals):
             continue
-        out.append(dict(zip(names, vals)))
+        row = dict(zip(names, vals))
+        if with_formulas:
+            row["_row"] = r + 1
+            row["_amount_formula"] = getattr(table.cell(r, amount_col), "formula", None) if amount_col is not None else None
+        out.append(row)
     return out
+
+
+# The sheets record the roommate's half as a negative row whose Amount formula halves specific rows, e.g.
+# "SUM(E31,E29,E32)÷-2" or "D31÷-2". Only these pure 50% forms become Shared flags; anything else
+# (÷-1 = roommate paid it all, ÷-4, constants mixed in) stays as an ordinary row so totals don't change.
+HALF_SHARE = [re.compile(p) for p in (
+    r"SUM\(([A-Z]+\d+(?:[,+][A-Z]+\d+)*)\)÷-2",
+    r"([A-Z]+\d+)÷-2",
+    r"-([A-Z]+\d+)÷2",
+    r"([A-Z]+\d+)÷2×-1",
+)]
+
+
+def half_share_refs(formula: str | None, amount_letter: str) -> list[int] | None:
+    """Row numbers a pure "these rows ÷ -2" formula halves (all in the Amount column), else None."""
+    if not formula:
+        return None
+    f = formula.replace(" ", "")
+    for pattern in HALF_SHARE:
+        if m := pattern.fullmatch(f):
+            refs = re.findall(r"([A-Z]+)(\d+)", m.group(1))
+            if refs and all(col == amount_letter for col, _ in refs):
+                return [int(n) for _, n in refs]
+    return None
 
 
 def text(v) -> str:
@@ -185,14 +217,32 @@ def extract(paths: list[Path], include_future: bool, undated_day: int | None = N
             if "Transactions" not in tables:
                 continue
             future = date(*ym, 1) > this_month
-            for row in table_dicts(tables["Transactions"]):
+            t = tables["Transactions"]
+            headers = [text(t.cell(0, c).value) for c in range(t.num_cols)]
+            amount_letter = chr(ord("A") + headers.index("Amount"))
+            rows = table_dicts(t, with_formulas=True)
+            share_rows, shared_refs = set(), set()
+            for row in rows:
+                if (refs := half_share_refs(row["_amount_formula"], amount_letter)) is not None:
+                    share_rows.add(row["_row"])
+                    shared_refs.update(refs)
+            exported = set()
+            for row in rows:
                 desc, cat_raw = text(row.get("Description")), text(row.get("Category"))
                 amt = number(row.get("Amount"))
+                if row["_row"] in share_rows:
+                    st["roommate-half rows replaced by Shared flags"] += 1
+                    continue
                 # Summary rows are marked in Category (the sheet totals with SUMIF on Category); a description
                 # like "Total Wine" is a real purchase, so only a bare "Total"/"Sum" description counts.
                 if SUMMARY_ROW.match(cat_raw) or re.fullmatch(r"(total|sum):?", desc, flags=re.I):
                     st["total/sum rows skipped"] += 1
                     continue
+                if not desc and row["_amount_formula"] and cat_raw.lower() in sheet_cats:
+                    # A roommate adjustment the 50% flags can't express (e.g. "SUM(...)÷-2-E58-E63"): keep it
+                    # as a row so the month's totals still match the sheet.
+                    desc = "Roommate share adjustment"
+                    st["roommate adjustments kept as rows"] += 1
                 if not desc:
                     st["rows without a description skipped"] += 1
                     continue
@@ -221,12 +271,17 @@ def extract(paths: list[Path], include_future: bool, undated_day: int | None = N
                 if bank and bank not in {"FIDELITY", "C1", "AMEX", "DISCOVER"}:
                     odd_banks[bank] += 1
                 raw_date = row.get("Date")
+                shared = int(row["_row"] in shared_refs)
                 tx.append({
-                    "Date": final, "Bank": bank, "Description": desc, "Category": cat, "Amount": amt,
+                    "Date": final, "Bank": bank, "Description": desc, "Category": cat, "Amount": amt, "Shared": shared,
                     "Original Date": raw_date.date().isoformat() if isinstance(raw_date, datetime) else text(raw_date),
                     "Source File": path.name, "Sheet": sheet.name.strip(), "Sheet Month": month_key,
                 })
+                exported.add(row["_row"])
                 st["transactions"] += 1
+                st["transactions marked shared"] += shared
+            if missing := shared_refs - exported:
+                st["shared references to rows not exported (skipped/future/blank)"] += len(missing)
     return tx, budgets, pays, stats, unknown_cats, odd_banks, budget_cats
 
 

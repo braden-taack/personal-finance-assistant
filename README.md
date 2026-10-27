@@ -76,7 +76,11 @@ current one are left out unless you pass `--include-future`. Venmo and BILT rows
 employer 401K match for each month is whatever the sheet's own 401k Saved (Table 1) counts beyond your
 contribution (the sheets counted a 1:1 match through 2023 and none from 2024 on). `--load-db` replaces each
 month's budget, adds any budget categories the app doesn't have yet (Roth IRA is flagged as savings), and saves
-the mid and end paychecks; other paycheck tables (e.g. a one-off promotion paycheck) are not loaded. Import `transactions.csv` on the **Import CSV** page. `numbers_files/` and `*.numbers` are
+the mid and end paychecks; other paycheck tables (e.g. a one-off promotion paycheck) are not loaded.
+Shared costs: the sheets record the roommate's half as a negative row whose formula halves specific rows (e.g.
+`SUM(E31,E29)÷-2`). The script turns each of those into a `Shared` = 1 flag on the rows it references and drops the
+negative row, so the app's 50% split gives the same totals. Formulas that aren't a plain half (the roommate paying
+all of it, a quarter, fixed amounts mixed in) stay as ordinary rows. The Import page reads the `Shared` column. Import `transactions.csv` on the **Import CSV** page. `numbers_files/` and `*.numbers` are
 git-ignored.
 
 To export a single sheet by hand instead: in Numbers, select the Transactions table, then File -> Export To -> CSV

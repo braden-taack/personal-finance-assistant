@@ -144,6 +144,7 @@ numbers = pd.DataFrame({
     "Description": ["TRADER JOES 552", "SHELL OIL 5521", "NETFLIX.COM", "GOLF GALAXY"],
     "Category": ["groceries", "Gas", "Coffee", "Golf"],
     "Amount": ["$62.40", "$41.00", "$15.49", "$1,200.00"],
+    "Shared": ["1", "", "0", "yes"],
 })
 nm = importer.guess_mapping(list(numbers.columns))
 assert nm["bank"] == "Bank" and nm["amount"] == "Amount"
@@ -154,6 +155,8 @@ assert n_clean["bank"].tolist() == ["AMEX", "DISCOVER", "AMEX", "AMEX"]
 assert n_clean["bank_invalid"].tolist() == [0, 0, 1, 1]           # CHASE / blank fall back to the confirmed bank
 assert n_clean["category"].tolist()[:2] == ["Groceries", "Gas"] and n_clean["category"][2] is None
 assert n_clean["amount"].tolist() == [62.40, 41.00, 15.49, 1200.00]
+assert nm["shared"] == "Shared" and n_clean["shared"].tolist() == [1, 0, 0, 1]   # optional Shared column
+assert importer.normalize(numbers.drop(columns="Shared"), nm | {"shared": None}, bank="AMEX")["shared"].sum() == 0
 print("Numbers export: OK")
 
 # ---------------------------------------------------------------- 7. Net Leftover (actual) mirrors the sheet

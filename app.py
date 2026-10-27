@@ -478,9 +478,9 @@ def page_import():
         return
     settings = db.get_bank(bank)
     saved = settings["mapping"] if importer.saved_mapping_fits(settings["mapping"], cols) else {}
-    # A saved mapping decides the required/amount columns; optional Category and Bank columns are still
+    # A saved mapping decides the required/amount columns; optional Category, Bank and Shared columns are still
     # picked up from this file's headers when the saved mapping doesn't name them.
-    defaults = {k: saved.get(k) or (guess.get(k) if not saved or k in ("category", "bank") else None)
+    defaults = {k: saved.get(k) or (guess.get(k) if not saved or k in ("category", "bank", "shared") else None)
                 for k in importer.FIELDS}
     if saved:
         st.caption(f"Using the saved column mapping for {bank}.")
@@ -496,7 +496,7 @@ def page_import():
     split_default = bool(defaults.get("debit") and defaults.get("credit") and not defaults.get("amount"))
     layout = st.radio("Amount layout", ["One amount column", "Separate Debit and Credit columns"],
                       index=1 if split_default else 0, horizontal=True, key=f"layout_{file_key}_{bank}")
-    c = st.columns(5)
+    c = st.columns(6)
     m = {"date": sel(c[0], "Date column", "date"), "description": sel(c[1], "Description column", "description")}
     if layout.startswith("One"):
         m["amount"] = sel(c[2], "Amount column", "amount")
@@ -509,6 +509,7 @@ def page_import():
         st.caption("Amount = Debit − Credit, so charges are positive and refunds negative.")
     m["category"] = sel(c[3], "Category column (optional)", "category")
     m["bank"] = sel(c[4], "Bank column (optional)", "bank")
+    m["shared"] = sel(c[5], "Shared column (optional)", "shared")
     if m["bank"]:
         st.info(f"The file has a Bank column: each row uses its own value. Blank or unknown values "
                 f"(anything not in {', '.join(banks)}) fall back to {bank}.")
@@ -536,7 +537,8 @@ def page_import():
     dups, transfers = st.session_state["imp_dups"], st.session_state["imp_transfers"]
     missing = clean.index[clean["date_missing"] == 1].tolist()
     st.success(f"{len(clean)} rows · {len(dups)} possible duplicate(s) · {len(transfers)} payment/transfer(s) · "
-               f"{len(missing)} missing date(s) · banks: {clean['bank'].value_counts().to_dict()}")
+               f"{len(missing)} missing date(s) · {int(clean['shared'].sum())} shared · "
+               f"banks: {clean['bank'].value_counts().to_dict()}")
 
     bad_bank = clean[clean["bank_invalid"] == 1]
     if m.get("bank") and not bad_bank.empty:

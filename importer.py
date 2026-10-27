@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from difflib import SequenceMatcher
 
 import pandas as pd
@@ -10,7 +11,8 @@ import db
 from config import (BANK_FILENAME_HINTS, DUP_DATE_WINDOW_DAYS, DUP_DESC_SIMILARITY, SAVINGS_TRANSFER_RULES,
                     TRANSFER_PATTERNS)
 
-FIELDS = ["date", "description", "amount", "debit", "credit", "category", "bank", "shared"]
+TRUTHY = ["1", "1.0", "true", "yes", "y", "x"]
+FIELDS = ["date", "description", "amount", "debit", "credit", "category", "bank", "shared", "settled"]
 
 
 def read_csv(file) -> pd.DataFrame:
@@ -40,6 +42,7 @@ def guess_mapping(columns: list[str]) -> dict:
         "category": pick("category"),
         "bank": pick("bank"),
         "shared": pick("shared"),
+        "settled": pick("settled"),
     }
     if m["amount"] and m["debit"] and m["credit"]:
         m["debit"] = m["credit"] = None   # prefer the single signed column when both exist
@@ -91,7 +94,8 @@ def normalize(df: pd.DataFrame, mapping: dict, bank: str, charges_negative: bool
     `bank` applies to every row unless the file has a mapped Bank column; per-row values are
     validated against the banks table and invalid/blank ones fall back to `bank` (bank_invalid=1).
     Rows with a blank or unreadable date are kept with date=None and date_missing=1.
-    An optional Shared column (1/yes/true/x) marks rows split 50/50 with the roommate.
+    An optional Shared column (1/yes/true/x) marks rows split 50/50 with the roommate, and an optional
+    Settled column marks shared rows already paid back (settled date = today).
     Category values are matched case-insensitively to known categories; unknown ones become None
     (original text kept in category_raw) so the cascade categorizes them.
     """
@@ -126,7 +130,13 @@ def normalize(df: pd.DataFrame, mapping: dict, bank: str, charges_negative: bool
     out["shared"] = 0
     if mapping.get("shared") and mapping["shared"] in df:   # optional: rows split 50/50 with the roommate
         flag = df[mapping["shared"]].astype(str).str.strip().str.lower()
-        out["shared"] = flag.isin(["1", "1.0", "true", "yes", "y", "x"]).astype(int)
+        out["shared"] = flag.isin(TRUTHY).astype(int)
+    out["shared_settled"] = 0
+    out["shared_settled_date"] = None
+    if mapping.get("settled") and mapping["settled"] in df:   # optional: shared rows already paid back
+        settled = df[mapping["settled"]].astype(str).str.strip().str.lower().isin(TRUTHY) & (out["shared"] == 1)
+        out["shared_settled"] = settled.astype(int)
+        out.loc[settled, "shared_settled_date"] = date.today().isoformat()
 
     out["category"] = None
     out["category_raw"] = ""

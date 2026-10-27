@@ -80,7 +80,9 @@ the mid and end paychecks; other paycheck tables (e.g. a one-off promotion paych
 Shared costs: the sheets record the roommate's half as a negative row whose formula halves specific rows (e.g.
 `SUM(E31,E29)÷-2`). The script turns each of those into a `Shared` = 1 flag on the rows it references and drops the
 negative row, so the app's 50% split gives the same totals. Formulas that aren't a plain half (the roommate paying
-all of it, a quarter, fixed amounts mixed in) stay as ordinary rows. The Import page reads the `Shared` column. Import `transactions.csv` on the **Import CSV** page. `numbers_files/` and `*.numbers` are
+all of it, a quarter, fixed amounts mixed in) stay as ordinary rows. `--settled-through YYYY-MM` adds a `Settled`
+column marking shared rows on that month and earlier as already paid back. The Import page reads both columns
+(settled rows get the import date as their settled date). Import `transactions.csv` on the **Import CSV** page. `numbers_files/` and `*.numbers` are
 git-ignored.
 
 To export a single sheet by hand instead: in Numbers, select the Transactions table, then File -> Export To -> CSV

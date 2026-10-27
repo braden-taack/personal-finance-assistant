@@ -13,6 +13,7 @@ date keep a blank Date so the Import page asks for one.
     python tools/numbers_import.py numbers_files/                 # write CSVs to data/numbers_export/
     python tools/numbers_import.py numbers_files/ --load-db       # also load budgets + paychecks into the app DB
     python tools/numbers_import.py numbers_files/ --undated-day 1 # put undated rows on the 1st of their month
+    python tools/numbers_import.py numbers_files/ --settled-through 2026-09   # shared rows up to then are settled
 
 Transactions are not written to the database: import transactions.csv on the Import CSV page so they get
 the bank confirmation, duplicate and transfer checks and the ML -> LLM -> review cascade.
@@ -317,6 +318,8 @@ def main() -> None:
     ap.add_argument("--include-future", action="store_true", help="also export transactions on months after this one")
     ap.add_argument("--undated-day", type=int, metavar="N",
                     help="put rows with no usable date on day N of their sheet's month (default: leave blank to fix on import)")
+    ap.add_argument("--settled-through", metavar="YYYY-MM",
+                    help="mark shared rows on this month and earlier as settled with the roommate (Settled column)")
     ap.add_argument("--load-db", action="store_true", help="load budgets + paychecks into the app database")
     args = ap.parse_args()
 
@@ -328,6 +331,9 @@ def main() -> None:
 
     args.out.mkdir(parents=True, exist_ok=True)
     tx_df = pd.DataFrame(tx).sort_values(["Sheet Month", "Date"], kind="stable")
+    through = args.settled_through or ""
+    tx_df.insert(tx_df.columns.get_loc("Shared") + 1, "Settled",
+                 ((tx_df["Shared"] == 1) & (tx_df["Sheet Month"] <= through)).astype(int) if through else 0)
     bud_df, pay_df = pd.DataFrame(budgets), pd.DataFrame(pays)
     tx_df.to_csv(args.out / "transactions.csv", index=False)
     bud_df.to_csv(args.out / "budgets.csv", index=False)
@@ -340,6 +346,10 @@ def main() -> None:
     print(f"\nTotals: {len(tx_df)} transactions ({tx_df['Sheet Month'].min()} to {tx_df['Sheet Month'].max()}), "
           f"budgets for {bud_df['Month'].nunique()} months, paychecks for {pay_df['Month'].nunique()} months "
           f"(months per period: { {k: int(v) for k, v in pay_df.groupby('Period')['Month'].nunique().items()} }).")
+    if through:
+        open_rows = tx_df[(tx_df["Shared"] == 1) & (tx_df["Settled"] == 0)]
+        print(f"Settled through {through}: {int(tx_df['Settled'].sum())} shared rows; still owed on "
+              f"{len(open_rows)} rows: ${(open_rows['Amount'] / 2).sum():,.2f}")
     if unknown_cats:
         print("Transaction categories that aren't budget categories (sent through the cascade on import):",
               dict(unknown_cats.most_common()))

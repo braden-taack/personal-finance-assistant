@@ -145,6 +145,7 @@ numbers = pd.DataFrame({
     "Category": ["groceries", "Gas", "Coffee", "Golf"],
     "Amount": ["$62.40", "$41.00", "$15.49", "$1,200.00"],
     "Shared": ["1", "", "0", "yes"],
+    "Settled": ["1", "1", "", ""],
 })
 nm = importer.guess_mapping(list(numbers.columns))
 assert nm["bank"] == "Bank" and nm["amount"] == "Amount"
@@ -156,6 +157,8 @@ assert n_clean["bank_invalid"].tolist() == [0, 0, 1, 1]           # CHASE / blan
 assert n_clean["category"].tolist()[:2] == ["Groceries", "Gas"] and n_clean["category"][2] is None
 assert n_clean["amount"].tolist() == [62.40, 41.00, 15.49, 1200.00]
 assert nm["shared"] == "Shared" and n_clean["shared"].tolist() == [1, 0, 0, 1]   # optional Shared column
+assert n_clean["shared_settled"].tolist() == [1, 0, 0, 0]                      # settled only counts on shared rows
+assert n_clean["shared_settled_date"][0] == date.today().isoformat() and n_clean["shared_settled_date"][1] is None
 assert importer.normalize(numbers.drop(columns="Shared"), nm | {"shared": None}, bank="AMEX")["shared"].sum() == 0
 print("Numbers export: OK")
 

@@ -1,4 +1,4 @@
-"""Categorization cascade: savings rules -> ML -> LLM (parallel requests) -> manual review."""
+"""Categorization cascade: savings rules -> ML -> LLM (parallel, with my history as context) -> manual review."""
 from __future__ import annotations
 
 import pandas as pd
@@ -7,6 +7,7 @@ import classifier
 import db
 import importer
 import llm
+import retrieval
 from config import LLM_MODEL, LLM_PARALLEL, LLM_THRESHOLD, ML_THRESHOLD
 
 
@@ -49,8 +50,11 @@ def categorize_frame(df: pd.DataFrame, use_llm: bool = True) -> pd.DataFrame:
     llm_answers = [("", 0.0)] * len(unsure)
     model = llm.resolve_model(llm_model()) if use_llm and unsure and cats else None
     if model:
-        items = [(df.at[idx, "description"], float(df.at[idx, "amount"]), cat or None) for idx, cat, _ in unsure]
-        llm_answers = llm.categorize_many(items, cats, model=model, workers=llm_parallel())
+        # Give the LLM my own history: similar past transactions and typical merchants per category.
+        index = retrieval.ExampleIndex(db.fetch_labeled())
+        items = [(df.at[idx, "description"], float(df.at[idx, "amount"]), cat or None,
+                  index.similar(df.at[idx, "description"])) for idx, cat, _ in unsure]
+        llm_answers = llm.categorize_many(items, cats, model=model, workers=llm_parallel(), glossary=index.glossary())
     df.attrs["llm_model"] = model
 
     for (idx, cat, conf), (lcat, lconf) in zip(unsure, llm_answers):

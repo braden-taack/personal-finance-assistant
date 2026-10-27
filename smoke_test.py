@@ -228,7 +228,7 @@ assert llm.resolve_model() is None                                             #
 active, peak, lock = 0, 0, threading.Lock()
 
 
-def fake_categorize(desc, amount, cats, hint=None, model=None):
+def fake_categorize(desc, amount, cats, hint=None, model=None, examples=None, glossary=None):
     global active, peak
     with lock:
         active += 1
@@ -260,6 +260,31 @@ try:
 finally:
     llm.categorize, llm.resolve_model = real_categorize, real_resolve
 print("LLM model choice + parallel requests: OK")
+
+# ---------------------------------------------------------------- 8c. LLM context from my own history
+import retrieval  # noqa: E402
+
+index = retrieval.ExampleIndex(db.fetch_labeled())
+near = index.similar("WHOLE FOODS #555")
+assert near and near[0][1] == "Groceries" and near[0][0].startswith("WHOLE FOODS")   # store numbers ignored
+assert index.similar("") == [] and "Groceries" in index.glossary() and len(index.glossary()["Gas"]) <= 4
+system, user = llm.build_prompt("WHOLE FOODS #555", 12.0, db.get_categories(), hint="Groceries",
+                                examples=near, glossary=index.glossary())
+assert "follow how they used them" in system and '-> Groceries' in user and "- Groceries: " in user
+assert "Most similar" not in llm.build_prompt("X", 1.0, ["Gas"])[1]                  # no context -> plain prompt
+seen = {}
+llm.categorize, llm.resolve_model = (lambda d, a, c, hint=None, model=None, examples=None, glossary=None:
+                                     seen.setdefault(d, (examples, glossary)) and ("Groceries", 0.9)), \
+                                    (lambda preferred=None, models=None: "fake/model")
+real_predict, classifier.predict = classifier.predict, lambda descs, model=None: [("", 0.0)] * len(descs)  # ML unsure
+try:
+    pipeline.categorize_frame(pd.DataFrame({"description": ["QQQ WHOLE FOODS 777"], "amount": [5.0], "category": [None],
+                                            "date": ["2026-10-20"], "bank": ["AMEX"]}))
+    ex, gl = seen["QQQ WHOLE FOODS 777"]
+    assert ex and ex[0][1] == "Groceries" and "Groceries" in gl                     # pipeline passes the context
+finally:
+    llm.categorize, llm.resolve_model, classifier.predict = real_categorize, real_resolve, real_predict
+print("LLM history context: OK")
 
 # ---------------------------------------------------------------- 9. manual label -> retrain picks it up
 rid = int(db.fetch_review_queue().iloc[0]["id"])

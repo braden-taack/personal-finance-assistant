@@ -102,6 +102,9 @@ in the `settings` table (schema v3). The import message names the model that was
 2. **Savings rules**: Investing / Savings transfers are categorized by rule (`rule`).
 3. **ML model** (TF-IDF word + char n-grams -> logistic regression). Confidence >= 80% is accepted.
 4. **LM Studio LLM** picks from the category list and returns JSON with a confidence. >= 80% is accepted.
+   The prompt includes your own history (`retrieval.py`): the most similar past transactions and how you
+   categorized them, plus typical merchants for each category, so it follows your conventions rather than
+   guessing what a category like Superlatives means.
    All rows the ML model was unsure about are sent together, up to 4 requests at once (Categories & Model page,
    or `FT_LLM_PARALLEL`). LM Studio only runs them concurrently when its **Max Concurrent Predictions** setting
    (model load settings) is at least that high; otherwise they queue.

@@ -68,23 +68,47 @@ def _extract_json(text: str) -> dict | None:
         return None
 
 
+def build_prompt(description: str, amount: float, categories: list[str], hint: str | None = None,
+                 examples: list[tuple[str, str, int]] | None = None,
+                 glossary: dict[str, list[str]] | None = None) -> tuple[str, str]:
+    """(system, user) messages. `examples` are similar past transactions (description, category, times used)
+    and `glossary` maps categories to typical merchants; both come from retrieval.ExampleIndex."""
+    system = (
+        "You categorize one person's expense transactions. Choose exactly one category from the "
+        "provided list. Respond with ONLY a JSON object: "
+        '{"category": "<one of the list>", "confidence": <number 0-1>}. Never invent categories.'
+    )
+    if examples or glossary:
+        system += (
+            " The categories are this person's own; follow how they used them in the past (the category "
+            "examples and similar past transactions) over general knowledge. Give confidence above 0.8 only "
+            "when similar past transactions clearly support your choice; give 0.5 or less when they don't."
+        )
+    else:
+        system += " Set confidence low if the merchant is ambiguous or unfamiliar."
+    lines = []
+    if glossary:
+        lines.append("Categories, with merchants this person filed under each:")
+        lines += [f"- {c}: " + "; ".join(d[:40] for d in glossary.get(c, [])) for c in categories]
+    else:
+        lines.append(f"Categories: {json.dumps(categories)}")
+    if examples:
+        lines.append("Most similar past transactions (description -> category, times):")
+        lines += [f'- "{d[:60]}" -> {c} ({n}x)' for d, c, n in examples]
+    lines.append(f"Transaction to categorize: {description}\nAmount: {amount:.2f}")
+    if hint:
+        lines.append(f"A text classifier's unsure guess was '{hint}'.")
+    return system, "\n".join(lines)
+
+
 def categorize(description: str, amount: float, categories: list[str], hint: str | None = None,
-               model: str | None = None) -> tuple[str, float]:
+               model: str | None = None, examples: list[tuple[str, str, int]] | None = None,
+               glossary: dict[str, list[str]] | None = None) -> tuple[str, float]:
     """Ask the local LLM to pick a category. Returns (category, confidence 0-1).
 
     Returns ('', 0.0) on any failure so the pipeline falls through to manual review.
     """
-    system = (
-        "You categorize personal expense transactions. Choose exactly one category from the "
-        "provided list. Respond with ONLY a JSON object: "
-        '{"category": "<one of the list>", "confidence": <number 0-1>}. '
-        "Set confidence low if the merchant is ambiguous or unfamiliar. Never invent categories."
-    )
-    user = (
-        f"Categories: {json.dumps(categories)}\n"
-        f"Transaction description: {description}\nAmount: {amount:.2f}\n"
-        + (f"The classical model's best guess was '{hint}' but was unsure.\n" if hint else "")
-    )
+    system, user = build_prompt(description, amount, categories, hint, examples, glossary)
     try:
         r = requests.post(
             f"{LLM_BASE_URL}/chat/completions",
@@ -116,10 +140,18 @@ def categorize(description: str, amount: float, categories: list[str], hint: str
     return lookup[cat.lower()], conf
 
 
-def categorize_many(items: list[tuple[str, float, str | None]], categories: list[str], model: str | None = None,
-                    workers: int = LLM_PARALLEL) -> list[tuple[str, float]]:
-    """categorize() for each (description, amount, hint), up to `workers` requests at once. Results keep input order."""
+def categorize_many(items: list[tuple], categories: list[str], model: str | None = None,
+                    workers: int = LLM_PARALLEL, glossary: dict[str, list[str]] | None = None) -> list[tuple[str, float]]:
+    """categorize() for each (description, amount, hint[, examples]), up to `workers` requests at once.
+
+    Results keep input order.
+    """
     if not items:
         return []
+
+    def one(it):
+        return categorize(it[0], it[1], categories, hint=it[2], model=model,
+                          examples=it[3] if len(it) > 3 else None, glossary=glossary)
+
     with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
-        return list(pool.map(lambda it: categorize(it[0], it[1], categories, hint=it[2], model=model), items))
+        return list(pool.map(one, items))

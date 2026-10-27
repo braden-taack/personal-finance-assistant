@@ -5,6 +5,15 @@ budget sheet. Everything runs on your machine; the only network call is to your 
 
 ## Setup
 ```bash
+./run.sh                    # first run creates .venv and installs requirements, then opens the app
+./run.sh install-launcher   # optional: adds "Finance Tracker" (with a Stop action) to the application menu
+```
+`./run.sh` starts the app in the background at http://localhost:8501 and opens your browser; if it's already running
+it just opens the browser. It also starts LM Studio's server through `lms` if that isn't up. Other commands:
+`./run.sh stop`, `restart`, `status`, `logs` (logs are in `data/streamlit.log`). `PORT=8600 ./run.sh` uses another port.
+
+Manual setup instead:
+```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py

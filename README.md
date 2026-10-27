@@ -61,7 +61,23 @@ Only date, description and amount are required. Amount can be one signed column,
      dates within 3 days and description similarity >= 85%. Legacy rows with no bank match any bank. You choose
      skip or import per pair.
 
-**Numbers export**: in Numbers, select the Transactions table, then File -> Export To -> CSV
+**Numbers files (one file per year, one sheet per month)**: `tools/numbers_import.py` reads `.numbers` files directly,
+with no Numbers app needed:
+```bash
+python tools/numbers_import.py numbers_files/                  # writes data/numbers_export/*.csv
+python tools/numbers_import.py numbers_files/ --undated-day 1  # put rows with no usable date on the 1st
+python tools/numbers_import.py numbers_files/ --load-db        # also load budgets + paychecks into the app
+```
+It writes `transactions.csv` (from each Transactions table), `budgets.csv` (Summary by Category, Budget column) and
+`paychecks.csv` (the Mid/End of Month Paycheck tables). The month comes from the sheet name and the year from the file
+name, and they override a transaction's own date; the original is kept in `Original Date`. Template and yearly-total
+sheets, total/sum rows, and rows without a description or amount are skipped. Transactions on months after the
+current one are left out unless you pass `--include-future`. `--load-db` replaces each month's budget, adds any
+budget categories the app doesn't have yet, and saves both paychecks with an employer 401K match equal to the
+employee contribution. Import `transactions.csv` on the **Import CSV** page. `numbers_files/` and `*.numbers` are
+git-ignored.
+
+To export a single sheet by hand instead: in Numbers, select the Transactions table, then File -> Export To -> CSV
 (Date, Bank, Description, Category, Amount). Categories that match a budget category (case-insensitive) are
 stored as trusted `import` labels; anything else goes through the cascade.
 

@@ -4,5 +4,7 @@ scikit-learn>=1.4
 joblib>=1.3
 plotly>=5.20
 requests>=2.31
+# Reading Apple Numbers files (tools/numbers_import.py)
+numbers-parser>=4.22
 # Browser end-to-end test (tests/e2e_playwright.py); run `python -m playwright install chromium` once
 playwright>=1.64

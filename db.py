@@ -424,6 +424,14 @@ def set_budget(month: str, category: str, amount: float) -> None:
         )
 
 
+def replace_budget(month: str, amounts: dict[str, float]) -> None:
+    """Make `amounts` the whole budget for `month` (categories not listed are removed)."""
+    with connect() as c:
+        c.execute("DELETE FROM budgets WHERE month=?", (month,))
+        c.executemany("INSERT INTO budgets(month, category, amount) VALUES(?,?,?)",
+                      [(month, cat, float(amt)) for cat, amt in amounts.items()])
+
+
 def copy_budget_forward(from_month: str, to_month: str) -> int:
     with connect() as c:
         cur = c.execute(

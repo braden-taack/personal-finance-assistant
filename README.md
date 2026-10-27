@@ -72,9 +72,11 @@ It writes `transactions.csv` (from each Transactions table), `budgets.csv` (Summ
 `paychecks.csv` (the Mid/End of Month Paycheck tables). The month comes from the sheet name and the year from the file
 name, and they override a transaction's own date; the original is kept in `Original Date`. Template and yearly-total
 sheets, total/sum rows, and rows without a description or amount are skipped. Transactions on months after the
-current one are left out unless you pass `--include-future`. `--load-db` replaces each month's budget, adds any
-budget categories the app doesn't have yet, and saves both paychecks with an employer 401K match equal to the
-employee contribution. Import `transactions.csv` on the **Import CSV** page. `numbers_files/` and `*.numbers` are
+current one are left out unless you pass `--include-future`. Venmo and BILT rows are filed under FIDELITY. The
+employer 401K match for each month is whatever the sheet's own 401k Saved (Table 1) counts beyond your
+contribution (the sheets counted a 1:1 match through 2023 and none from 2024 on). `--load-db` replaces each
+month's budget, adds any budget categories the app doesn't have yet (Roth IRA is flagged as savings), and saves
+the mid and end paychecks; other paycheck tables (e.g. a one-off promotion paycheck) are not loaded. Import `transactions.csv` on the **Import CSV** page. `numbers_files/` and `*.numbers` are
 git-ignored.
 
 To export a single sheet by hand instead: in Numbers, select the Transactions table, then File -> Export To -> CSV

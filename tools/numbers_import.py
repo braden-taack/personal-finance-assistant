@@ -46,7 +46,8 @@ CATEGORY_ALIASES = {
     "grocerires": "Groceries",
     "merchandise & supplies-groceries": "Groceries",
 }
-BANK_ALIASES = {"michelle venmo": "VENMO"}
+# Venmo and BILT activity is tracked under the Fidelity account.
+BANK_ALIASES = {"venmo": "FIDELITY", "michelle venmo": "FIDELITY", "bilt": "FIDELITY"}
 
 
 # ---------------------------------------------------------------- parsing helpers
@@ -159,6 +160,27 @@ def extract(paths: list[Path], include_future: bool, undated_day: int | None = N
                     pays.append({"Month": month_key, "Period": period, "Category": cat, "Subcategory": sub,
                                  "Amount": amt, "Order": i})
 
+            # ---- employer 401K match: whatever the sheet's own "401k Saved" (Table 1, Budgeted row) counts
+            # beyond my contributions. The sheets counted a 1:1 match through 2023 and none from 2024 on.
+            sheet_401k = None
+            for row in table_dicts(tables["Table 1"]) if "Table 1" in tables else []:
+                if text(row.get("")).lower().startswith("budget"):
+                    sheet_401k = number(row.get("401k Saved"))
+            mine = {p["Period"]: 0.0 for p in pays if p["Month"] == month_key and p["Period"] in ("mid", "end")}
+            for p in pays:
+                if p["Month"] == month_key and p["Period"] in mine and p["Subcategory"].upper() == "401K":
+                    mine[p["Period"]] += p["Amount"]
+            total_mine = sum(mine.values())
+            if sheet_401k is None:
+                match_total = total_mine
+                st["months without a 401k Saved figure (match assumed = contribution)"] += 1
+            else:
+                match_total = max(0.0, round(sheet_401k - total_mine, 2))
+            for period, amount in mine.items():
+                share = amount / total_mine if total_mine else 1 / len(mine)
+                pays.append({"Month": month_key, "Period": period, "Category": "Employer", "Subcategory": "401K Match",
+                             "Amount": round(match_total * share, 2), "Order": 999})
+
             # ---- transactions
             if "Transactions" not in tables:
                 continue
@@ -217,20 +239,16 @@ def load_db(budgets: pd.DataFrame, pays: pd.DataFrame, budget_cats: list[str]) -
     added = [c for c in budget_cats if c not in existing]
     for c in added:
         db.add_category(c)
+    for c in budget_cats:
+        if c in config.SAVINGS_CATEGORIES:
+            db.set_category_savings(c, True)
     for month, grp in budgets.groupby("Month"):
         db.replace_budget(month, dict(zip(grp["Category"], grp["Budget"])))
     loaded, skipped = 0, sorted(set(pays.loc[~pays["Period"].isin(config.PAYCHECK_PERIODS), "Period"]))
     for month, grp in pays[pays["Period"].isin(config.PAYCHECK_PERIODS)].groupby("Month"):
-        lines = []
-        for period, p in grp.sort_values("Order").groupby("Period", sort=False):
-            p = p.rename(columns={"Period": "period", "Category": "category", "Subcategory": "subcategory",
-                                  "Amount": "amount"})[["period", "category", "subcategory", "amount"]]
-            k401 = p.loc[p["subcategory"].str.upper() == config.RETIREMENT_SUBCATEGORY.upper(), "amount"].sum()
-            # Same assumption as the seed: the employer matches the employee 401K contribution 1:1.
-            match = pd.DataFrame([{"period": period, "category": config.EMPLOYER_CATEGORY,
-                                   "subcategory": config.EMPLOYER_MATCH_SUBCATEGORY, "amount": k401}])
-            lines.append(pd.concat([p, match], ignore_index=True))
-        db.save_paychecks(month, pd.concat(lines, ignore_index=True))
+        lines = grp.sort_values(["Period", "Order"], key=lambda s: s.map({"mid": 0, "end": 1}) if s.name == "Period" else s)
+        db.save_paychecks(month, lines.rename(columns={"Period": "period", "Category": "category",
+                                                       "Subcategory": "subcategory", "Amount": "amount"}))
         loaded += 1
     print(f"\nLoaded into {db.DB_PATH}: budgets for {budgets['Month'].nunique()} months, paychecks for {loaded} months."
           + (f" Added categories: {', '.join(added)}." if added else "")

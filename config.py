@@ -62,7 +62,8 @@ DEFAULT_CATEGORIES = [
     "Health Insurance", "Dental Insurance", "Renters Insurance", "Student Loans", "Gas", "Phone",
     "Internet", "Car Payment", "Travel", "Golf", "Superlatives", "Laundry", "Investing", "Savings",
 ]
-SAVINGS_CATEGORIES = ["Investing", "Savings"]
+# Roth IRA isn't seeded; it's added (and flagged) when budgets that use it are loaded from Numbers files.
+SAVINGS_CATEGORIES = ["Investing", "Savings", "Roth IRA"]
 
 # Seed budget for the current month (categories not listed are 0). Total = 5299.13.
 DEFAULT_BUDGET = {

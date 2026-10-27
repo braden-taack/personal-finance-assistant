@@ -110,7 +110,14 @@ take-home.
 For phone/remote access, run on a home machine and use Tailscale (or a similar private VPN) rather than exposing
 the port publicly; pass `--server.address 0.0.0.0` only on a trusted network.
 
-## Test
+## Tests
 `python smoke_test.py` runs everything on temp databases: migration from the old schema, seeds, bank-confirmed
-import, same-bank duplicates, transfer flagging, Numbers export, paycheck take-home, Net Leftover, shared expenses
-and settling.
+import, same-bank duplicates, transfer flagging, Numbers export, paycheck take-home, Net Leftover, shared expenses,
+settling, LLM model choice and parallel requests.
+
+`python tests/e2e_playwright.py` drives the real app in a headless browser (Playwright) on a throwaway database.
+It covers paychecks, both import flows (bank pre-selection, debit/credit, transfers, duplicates, fixing a blank
+date), sharing and settling, dashboard totals, and the LLM selector. It generates its own sample CSVs dated in the
+current month and starts and stops the app itself. Run `python -m playwright install chromium` once first.
+LM Studio is optional: when it's unreachable, the LLM checks are skipped. Options: `--llm-url`, `--headed`
+(watch it run), `--shots DIR` (save screenshots).

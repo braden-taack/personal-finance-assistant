@@ -22,8 +22,8 @@ LLM_TIMEOUT = float(os.environ.get("FT_LLM_TIMEOUT", "60"))
 LLM_MAX_TOKENS = int(os.environ.get("FT_LLM_MAX_TOKENS", "1024"))
 
 # Confidence cascade
-ML_THRESHOLD = float(os.environ.get("FT_ML_THRESHOLD", "0.70"))    # below -> ask LLM
-LLM_THRESHOLD = float(os.environ.get("FT_LLM_THRESHOLD", "0.60"))  # below -> manual review
+ML_THRESHOLD = float(os.environ.get("FT_ML_THRESHOLD", "0.80"))    # below -> ask LLM
+LLM_THRESHOLD = float(os.environ.get("FT_LLM_THRESHOLD", "0.80"))  # below -> manual review
 
 # Duplicate detection
 DUP_DATE_WINDOW_DAYS = int(os.environ.get("FT_DUP_WINDOW", "3"))

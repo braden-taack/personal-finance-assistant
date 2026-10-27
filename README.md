@@ -10,7 +10,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 Start LM Studio's local server (Developer tab -> Start Server, default `http://localhost:1234/v1`) and load a model.
-Optional env vars: `FT_LLM_URL`, `FT_LLM_MODEL`, `FT_ML_THRESHOLD` (0.70), `FT_LLM_THRESHOLD` (0.60),
+Optional env vars: `FT_LLM_URL`, `FT_LLM_MODEL`, `FT_ML_THRESHOLD` (0.80), `FT_LLM_THRESHOLD` (0.80),
 `FT_DUP_WINDOW` (3 days), `FT_DUP_SIM` (0.85), `FT_DB_PATH`, `FT_LLM_MAX_TOKENS` (1024: reasoning models such as
 Qwen3 think before answering, and a low cap returns no answer, sending everything to manual review).
 
@@ -100,8 +100,8 @@ in the `settings` table (schema v3). The import message names the model that was
 ## How categorization works
 1. A CSV category that matches a budget category is kept as an `import` label.
 2. **Savings rules**: Investing / Savings transfers are categorized by rule (`rule`).
-3. **ML model** (TF-IDF word + char n-grams -> logistic regression). Confidence >= 70% is accepted.
-4. **LM Studio LLM** picks from the category list and returns JSON with a confidence. >= 60% is accepted.
+3. **ML model** (TF-IDF word + char n-grams -> logistic regression). Confidence >= 80% is accepted.
+4. **LM Studio LLM** picks from the category list and returns JSON with a confidence. >= 80% is accepted.
    All rows the ML model was unsure about are sent together, up to 4 requests at once (Categories & Model page,
    or `FT_LLM_PARALLEL`). LM Studio only runs them concurrently when its **Max Concurrent Predictions** setting
    (model load settings) is at least that high; otherwise they queue.

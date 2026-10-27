@@ -32,11 +32,11 @@ st.sidebar.caption(f"LLM: {'🟢 reachable' if llm.is_available() else '🔴 off
 
 THIS_MONTH = date.today().strftime("%Y-%m")
 PERIOD_LABEL = {"mid": "Mid Month Paycheck", "end": "End of Month Paycheck"}
-MONEY = "${:,.2f}"
-
-
 def money(x: float) -> str:
-    return f"${x:,.2f}"
+    return f"-${-x:,.2f}" if x < -0.004 else f"${abs(x):,.2f}"
+
+
+MONEY = money  # Styler.format accepts a callable
 
 
 def month_options() -> list[str]:
@@ -151,8 +151,8 @@ def page_dashboard():
         view["date"] = view["date"].dt.strftime("%Y-%m-%d")
         view["shared"] = view["shared"].astype(bool)
         st.dataframe(view.rename(columns={"effective": "my share"}), hide_index=True, width="stretch",
-                     column_config={"amount": st.column_config.NumberColumn(format="$%.2f"),
-                                    "my share": st.column_config.NumberColumn(format="$%.2f")})
+                     column_config={"amount": st.column_config.NumberColumn(format="dollar"),
+                                    "my share": st.column_config.NumberColumn(format="dollar")})
 
     # ---- trends (all data, share-adjusted)
     st.subheader("Monthly trend")
@@ -212,7 +212,7 @@ def page_budgets():
     editor_df = pd.DataFrame({"category": cats, "amount": [float(existing.get(c, 0.0)) for c in cats]})
     edited = st.data_editor(editor_df, hide_index=True, disabled=["category"], width="stretch", key=f"bud_{month}",
                             height=(len(cats) + 1) * 35 + 3,
-                            column_config={"amount": st.column_config.NumberColumn(format="$%.2f", min_value=0.0)})
+                            column_config={"amount": st.column_config.NumberColumn(format="dollar", min_value=0.0)})
     st.metric("Total monthly budget", money(edited["amount"].sum()))
     if st.button("Save budget for this month", type="primary"):
         for _, r in edited.iterrows():
@@ -268,7 +268,7 @@ def page_paychecks():
             p = lines[lines["period"] == period][["category", "subcategory", "amount"]].reset_index(drop=True)
             e = st.data_editor(p, hide_index=True, disabled=["category", "subcategory"], width="stretch",
                                key=f"pay_{month}_{period}", height=(len(p) + 1) * 35 + 3,
-                               column_config={"amount": st.column_config.NumberColumn(format="$%.2f", min_value=0.0)})
+                               column_config={"amount": st.column_config.NumberColumn(format="dollar", min_value=0.0)})
             t = db.paycheck_totals(e)
             st.metric("Total (take-home)", money(t["take_home"]))
             st.caption(f"Gross {money(t['gross'])} − deductions {money(t['deductions'])}. "
@@ -338,8 +338,8 @@ def page_shared():
         out = st.data_editor(
             ed, key=key, width="stretch", hide_index=True,
             disabled=["Date", "Bank", "Description", "Category", "Amount", "My share", "Settled", "Hint"],
-            column_config={"Amount": st.column_config.NumberColumn(format="$%.2f"),
-                           "My share": st.column_config.NumberColumn(format="$%.2f"),
+            column_config={"Amount": st.column_config.NumberColumn(format="dollar"),
+                           "My share": st.column_config.NumberColumn(format="dollar"),
                            "Hint": st.column_config.TextColumn(help="Merchant was marked shared in another month. "
                                                                     "Just a hint — nothing is changed.")})
         sel = out.index[out["Select"]].tolist()
@@ -386,8 +386,8 @@ def page_shared():
             with st.expander(f"{cat} — {len(rows)} item(s), roommate owes {money(rows['roommate'].sum())}"):
                 st.dataframe(rows.drop(columns=["id", "category"]).rename(columns={"roommate": "roommate's half"}),
                              hide_index=True, width="stretch",
-                             column_config={"amount": st.column_config.NumberColumn("full amount", format="$%.2f"),
-                                            "roommate's half": st.column_config.NumberColumn(format="$%.2f")})
+                             column_config={"amount": st.column_config.NumberColumn("full amount", format="dollar"),
+                                            "roommate's half": st.column_config.NumberColumn(format="dollar")})
 
         s1, s2, s3 = st.columns([2, 1, 1])
         settle_cat = s1.selectbox("Category to settle", table.drop(index=reports.TOTAL).index, key="settle_cat")
@@ -402,11 +402,11 @@ def page_shared():
 
         c1, c2 = st.columns(2)
         if c1.button("Copy request message"):
-            st.session_state["rm_msg"] = reports.request_message(month)
+            st.session_state["rm_msg"] = month
         c2.download_button("Download itemized CSV", items.drop(columns=["id"]).to_csv(index=False),
                            file_name=f"shared-expenses-{month}.csv", mime="text/csv")
-        if st.session_state.get("rm_msg"):
-            st.code(st.session_state["rm_msg"], language=None)
+        if st.session_state.get("rm_msg") == month:   # rebuilt every run, so it never shows settled amounts
+            st.code(reports.request_message(month), language=None)
             st.caption("Use the copy icon in the box's corner, then paste into Venmo or a text.")
     else:
         years = sorted({int(m[:4]) for m in month_options()}, reverse=True)
@@ -450,9 +450,10 @@ def page_import():
         return
     settings = db.get_bank(bank)
     saved = settings["mapping"] if importer.saved_mapping_fits(settings["mapping"], cols) else {}
-    defaults = {k: saved.get(k) or (guess.get(k) if not saved else None) for k in importer.FIELDS}
-    if saved and not saved.get("bank") and guess.get("bank"):
-        defaults["bank"] = guess["bank"]
+    # A saved mapping decides the required/amount columns; optional Category and Bank columns are still
+    # picked up from this file's headers when the saved mapping doesn't name them.
+    defaults = {k: saved.get(k) or (guess.get(k) if not saved or k in ("category", "bank") else None)
+                for k in importer.FIELDS}
     if saved:
         st.caption(f"Using the saved column mapping for {bank}.")
 

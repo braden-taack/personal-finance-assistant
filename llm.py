@@ -6,7 +6,7 @@ import re
 
 import requests
 
-from config import LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT
+from config import LLM_BASE_URL, LLM_MAX_TOKENS, LLM_MODEL, LLM_TIMEOUT
 
 
 def is_available() -> bool:
@@ -51,7 +51,7 @@ def categorize(description: str, amount: float, categories: list[str], hint: str
                 "model": LLM_MODEL,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
                 "temperature": 0.0,
-                "max_tokens": 200,
+                "max_tokens": LLM_MAX_TOKENS,
             },
             timeout=LLM_TIMEOUT,
         )

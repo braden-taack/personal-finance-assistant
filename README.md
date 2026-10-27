@@ -11,7 +11,8 @@ streamlit run app.py
 ```
 Start LM Studio's local server (Developer tab -> Start Server, default `http://localhost:1234/v1`) and load a model.
 Optional env vars: `FT_LLM_URL`, `FT_LLM_MODEL`, `FT_ML_THRESHOLD` (0.70), `FT_LLM_THRESHOLD` (0.60),
-`FT_DUP_WINDOW` (3 days), `FT_DUP_SIM` (0.85), `FT_DB_PATH`.
+`FT_DUP_WINDOW` (3 days), `FT_DUP_SIM` (0.85), `FT_DB_PATH`, `FT_LLM_MAX_TOKENS` (1024: reasoning models such as
+Qwen3 think before answering, and a low cap returns no answer, sending everything to manual review).
 
 Data lives in `data/` (git-ignored): `finance.db` and `classifier.joblib`.
 
@@ -96,8 +97,9 @@ take-home.
   match differs.
 
 ## Access from elsewhere
-Keep it local for privacy. For phone/remote access, run on a home machine and use Tailscale (or a similar private
-VPN) rather than exposing the port publicly; add `--server.address 0.0.0.0` only on a trusted network.
+`.streamlit/config.toml` binds the app to `localhost`. Streamlit otherwise listens on every network interface.
+For phone/remote access, run on a home machine and use Tailscale (or a similar private VPN) rather than exposing
+the port publicly; pass `--server.address 0.0.0.0` only on a trusted network.
 
 ## Test
 `python smoke_test.py` runs everything on temp databases: migration from the old schema, seeds, bank-confirmed

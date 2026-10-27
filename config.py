@@ -13,6 +13,8 @@ MODEL_PATH = Path(os.environ.get("FT_MODEL_PATH", DATA_DIR / "classifier.joblib"
 LLM_BASE_URL = os.environ.get("FT_LLM_URL", "http://localhost:1234/v1")
 LLM_MODEL = os.environ.get("FT_LLM_MODEL", "local-model")  # LM Studio uses the loaded model
 LLM_TIMEOUT = float(os.environ.get("FT_LLM_TIMEOUT", "60"))
+# Reasoning models (e.g. Qwen3) spend tokens thinking before they answer; too low a cap returns no answer.
+LLM_MAX_TOKENS = int(os.environ.get("FT_LLM_MAX_TOKENS", "1024"))
 
 # Confidence cascade
 ML_THRESHOLD = float(os.environ.get("FT_ML_THRESHOLD", "0.70"))    # below -> ask LLM

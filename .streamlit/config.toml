@@ -1,0 +1,8 @@
+# Local-first: only this machine can reach the app. Streamlit otherwise listens on every
+# network interface. Override deliberately with `streamlit run app.py --server.address 0.0.0.0`.
+[server]
+address = "localhost"
+headless = true
+
+[browser]
+gatherUsageStats = false

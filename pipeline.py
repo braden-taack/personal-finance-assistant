@@ -61,10 +61,13 @@ def categorize_frame(df: pd.DataFrame, use_llm: bool = True) -> pd.DataFrame:
         if lcat and lconf >= LLM_THRESHOLD:
             df.loc[idx, ["category", "cat_source", "cat_confidence"]] = [lcat, "llm", lconf]
             continue
-        # Final fallback: park the best guess (if any) but flag for a human.
-        df.loc[idx, ["category", "cat_source", "cat_confidence", "needs_review"]] = [
-            cat or None, "ml" if cat else None, conf if cat else None, 1,
-        ]
+        # Final fallback: flag for a human, pre-filled with the LLM's answer if it gave one, else the ML guess.
+        if lcat:
+            df.loc[idx, ["category", "cat_source", "cat_confidence", "needs_review"]] = [lcat, "llm", lconf, 1]
+        else:
+            df.loc[idx, ["category", "cat_source", "cat_confidence", "needs_review"]] = [
+                cat or None, "ml" if cat else None, conf if cat else None, 1,
+            ]
     return df
 
 

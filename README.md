@@ -10,7 +10,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 Start LM Studio's local server (Developer tab -> Start Server, default `http://localhost:1234/v1`) and load a model.
-Optional env vars: `FT_LLM_URL`, `FT_LLM_MODEL`, `FT_ML_THRESHOLD` (0.80), `FT_LLM_THRESHOLD` (0.80),
+Optional env vars: `FT_LLM_URL`, `FT_LLM_MODEL`, `FT_ML_THRESHOLD` (0.80), `FT_LLM_THRESHOLD` (1.01 = the LLM never auto-accepts),
 `FT_DUP_WINDOW` (3 days), `FT_DUP_SIM` (0.85), `FT_DB_PATH`, `FT_LLM_MAX_TOKENS` (1024: reasoning models such as
 Qwen3 think before answering, and a low cap returns no answer, sending everything to manual review).
 
@@ -101,14 +101,16 @@ in the `settings` table (schema v3). The import message names the model that was
 1. A CSV category that matches a budget category is kept as an `import` label.
 2. **Savings rules**: Investing / Savings transfers are categorized by rule (`rule`).
 3. **ML model** (TF-IDF word + char n-grams -> logistic regression). Confidence >= 80% is accepted.
-4. **LM Studio LLM** picks from the category list and returns JSON with a confidence. >= 80% is accepted.
+4. **LM Studio LLM** picks from the category list and returns JSON with a confidence. By default it only
+   *suggests*: its answer pre-fills the review queue (threshold 1.01), because a calibration run on my data
+   showed its stated confidence doesn't predict correctness (about 55% right when it claimed >= 80%).
    The prompt includes your own history (`retrieval.py`): the most similar past transactions and how you
    categorized them, plus typical merchants for each category, so it follows your conventions rather than
    guessing what a category like Superlatives means.
    All rows the ML model was unsure about are sent together, up to 4 requests at once (Categories & Model page,
    or `FT_LLM_PARALLEL`). LM Studio only runs them concurrently when its **Max Concurrent Predictions** setting
    (model load settings) is at least that high; otherwise they queue.
-5. **Manual review queue**: anything left is flagged with the best guess pre-selected. Confirmed labels are saved
+5. **Manual review queue**: anything left is flagged with the best guess (LLM's, else ML's) pre-selected. Confirmed labels are saved
    as `manual` and feed the next retrain. The model trains only on `manual` / `import` labels, never on its own guesses.
 
 ## Shared expenses (roommate)

@@ -23,7 +23,9 @@ LLM_MAX_TOKENS = int(os.environ.get("FT_LLM_MAX_TOKENS", "1024"))
 
 # Confidence cascade
 ML_THRESHOLD = float(os.environ.get("FT_ML_THRESHOLD", "0.80"))    # below -> ask LLM
-LLM_THRESHOLD = float(os.environ.get("FT_LLM_THRESHOLD", "0.80"))  # below -> manual review
+# Above 1.0 the LLM never auto-accepts: calibration on my data showed its stated confidence doesn't
+# predict correctness (about 55% right at 0.8). Its answer pre-fills the review queue instead.
+LLM_THRESHOLD = float(os.environ.get("FT_LLM_THRESHOLD", "1.01"))  # below -> manual review
 
 # Duplicate detection
 DUP_DATE_WINDOW_DAYS = int(os.environ.get("FT_DUP_WINDOW", "3"))

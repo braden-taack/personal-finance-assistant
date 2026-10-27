@@ -254,7 +254,8 @@ try:
                           "category": None, "date": "2026-10-20", "bank": "AMEX"})
     out = pipeline.categorize_frame(frame, use_llm=True)
     assert peak == 2 and out.attrs["llm_model"] == "fake/model"                 # setting overrides the default 4
-    assert (out["cat_source"] == "llm").all() and (out["category"] == "Golf").all()
+    assert (out["cat_source"] == "llm").all() and (out["category"] == "Golf").all()   # LLM guess pre-fills review
+    assert config.LLM_THRESHOLD > 1 and (out["needs_review"] == 1).all()             # ...but never auto-accepts
     db.set_setting("llm_model", "picked/in-ui")
     assert pipeline.llm_model() == "picked/in-ui"
 finally:

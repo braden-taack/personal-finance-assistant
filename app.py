@@ -647,7 +647,9 @@ def page_review():
             a, b, c, d = st.columns([4, 2, 3, 1])
             a.markdown(f"**{r['description']}**  \n{r['date']} · {r['bank'] or '—'} · {money(r['amount'])}")
             guess = r["category"] if r["category"] in cats else None
-            b.caption(f"Best guess: {guess or '—'}" + (f" ({r['cat_confidence']:.0%})" if pd.notna(r["cat_confidence"]) else ""))
+            src = {"llm": "LLM", "ml": "ML model"}.get(r["cat_source"], r["cat_source"])
+            b.caption(f"Best guess: {guess or '—'}" + (f" ({src}, {r['cat_confidence']:.0%})"
+                                                      if guess and pd.notna(r["cat_confidence"]) else ""))
             choice = c.selectbox("Category", cats, index=cats.index(guess) if guess else None,
                                  key=f"rv_{r['id']}", placeholder="Choose…", label_visibility="collapsed")
             if d.button("Save", key=f"sv_{r['id']}") and choice:
@@ -763,7 +765,9 @@ def page_model():
                 st.rerun()
     with right:
         st.subheader("Classifier")
-        st.write(f"ML threshold **{ML_THRESHOLD:.0%}** → LLM threshold **{LLM_THRESHOLD:.0%}** → manual review. "
+        llm_step = (f"LLM threshold **{LLM_THRESHOLD:.0%}**" if LLM_THRESHOLD <= 1
+                    else "LLM **suggests only** (its guess pre-fills the review queue)")
+        st.write(f"ML threshold **{ML_THRESHOLD:.0%}** → {llm_step} → manual review. "
                  "(Set via `FT_ML_THRESHOLD` / `FT_LLM_THRESHOLD`.)")
         par = st.number_input("Parallel LLM requests", min_value=1, max_value=16, value=pipeline.llm_parallel(),
                               help="How many uncertain rows are sent to LM Studio at once. LM Studio only runs them "

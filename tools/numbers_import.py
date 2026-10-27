@@ -129,6 +129,22 @@ def half_share_refs(formula: str | None, amount_letter: str) -> list[int] | None
     return None
 
 
+# Rent was paid in full but recorded at my half; the roommate's half was added to what they owe by subtracting
+# it in the month's total row ("SUM(E6:E13)-1675" or "SUM(E11:E19)-E4"). Rent rows matched that way are
+# doubled and marked Shared, so my share stays the same and the roommate's half is tracked.
+HALVED_CATEGORIES = {"rent"}
+
+
+def total_row_subtractions(formula: str | None, amount_letter: str) -> tuple[list[float], set[int]]:
+    """(constants, row numbers) a total-row formula subtracts, e.g. "SUM(..)-1675+E12" -> ([1675.0], set())."""
+    if not formula:
+        return [], set()
+    f = formula.replace(" ", "")
+    rows = {int(n) for col, n in re.findall(r"-([A-Z]+)(\d+)", f) if col == amount_letter}
+    consts = [float(x) for x in re.findall(r"-(\d+(?:\.\d+)?)(?![\d.])", f)]   # also "E83-100"
+    return consts, rows
+
+
 def text(v) -> str:
     return "" if v is None else str(v).strip()
 
@@ -228,6 +244,22 @@ def extract(paths: list[Path], include_future: bool, undated_day: int | None = N
                     share_rows.add(row["_row"])
                     shared_refs.update(refs)
             exported = set()
+            # Rent rows the total row subtracts (by amount or by reference) were recorded at half.
+            consts, sub_rows = [], set()
+            for row in rows:
+                if SUMMARY_ROW.match(text(row.get("Category"))):
+                    c, r = total_row_subtractions(row["_amount_formula"], amount_letter)
+                    consts += c
+                    sub_rows |= r
+            halved_rows = set()
+            for row in rows:
+                if text(row.get("Category")).lower() in HALVED_CATEGORIES and row["_row"] not in share_rows:
+                    amt0 = number(row.get("Amount"))
+                    match = next((c for c in consts if amt0 is not None and abs(c - amt0) < 0.005), None)
+                    if row["_row"] in sub_rows or match is not None:
+                        halved_rows.add(row["_row"])
+                        if match is not None and row["_row"] not in sub_rows:
+                            consts.remove(match)
             for row in rows:
                 desc, cat_raw = text(row.get("Description")), text(row.get("Category"))
                 amt = number(row.get("Amount"))
@@ -273,6 +305,9 @@ def extract(paths: list[Path], include_future: bool, undated_day: int | None = N
                     odd_banks[bank] += 1
                 raw_date = row.get("Date")
                 shared = int(row["_row"] in shared_refs)
+                if row["_row"] in halved_rows and not shared:
+                    amt, shared = amt * 2, 1
+                    st["rent rows doubled + shared (recorded at half)"] += 1
                 tx.append({
                     "Date": final, "Bank": bank, "Description": desc, "Category": cat, "Amount": amt, "Shared": shared,
                     "Original Date": raw_date.date().isoformat() if isinstance(raw_date, datetime) else text(raw_date),

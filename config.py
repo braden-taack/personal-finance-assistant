@@ -11,7 +11,12 @@ MODEL_PATH = Path(os.environ.get("FT_MODEL_PATH", DATA_DIR / "classifier.joblib"
 
 # LM Studio exposes an OpenAI-compatible server (default port 1234).
 LLM_BASE_URL = os.environ.get("FT_LLM_URL", "http://localhost:1234/v1")
-LLM_MODEL = os.environ.get("FT_LLM_MODEL", "local-model")  # LM Studio uses the loaded model
+# Preferred model; if LM Studio doesn't offer it, whatever model is loaded there is used instead.
+# The sidebar's model selector overrides this (stored in the settings table).
+LLM_MODEL = os.environ.get("FT_LLM_MODEL", "nvidia/nemotron-3-nano-4b")
+# Concurrent LLM requests during categorization. LM Studio only runs them in parallel when its
+# "Max Concurrent Predictions" setting is above 1; otherwise they queue (still correct, just not faster).
+LLM_PARALLEL = int(os.environ.get("FT_LLM_PARALLEL", "4"))
 LLM_TIMEOUT = float(os.environ.get("FT_LLM_TIMEOUT", "60"))
 # Reasoning models (e.g. Qwen3) spend tokens thinking before they answer; too low a cap returns no answer.
 LLM_MAX_TOKENS = int(os.environ.get("FT_LLM_MAX_TOKENS", "1024"))

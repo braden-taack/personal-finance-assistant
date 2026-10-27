@@ -1,4 +1,4 @@
-"""Categorization cascade: savings rules -> ML -> LLM -> manual review."""
+"""Categorization cascade: savings rules -> ML -> LLM (parallel requests) -> manual review."""
 from __future__ import annotations
 
 import pandas as pd
@@ -7,7 +7,7 @@ import classifier
 import db
 import importer
 import llm
-from config import LLM_THRESHOLD, ML_THRESHOLD
+from config import LLM_MODEL, LLM_PARALLEL, LLM_THRESHOLD, ML_THRESHOLD
 
 
 def categorize_frame(df: pd.DataFrame, use_llm: bool = True) -> pd.DataFrame:
@@ -37,25 +37,37 @@ def categorize_frame(df: pd.DataFrame, use_llm: bool = True) -> pd.DataFrame:
     if len(todo) == 0:
         return df
 
-    model = classifier.load()
-    llm_up = use_llm and llm.is_available()
-
-    preds = classifier.predict(df.loc[todo, "description"].tolist(), model)
+    preds = classifier.predict(df.loc[todo, "description"].tolist(), classifier.load())
+    unsure = []
     for idx, (cat, conf) in zip(todo, preds):
         if cat and conf >= ML_THRESHOLD:
             df.loc[idx, ["category", "cat_source", "cat_confidence"]] = [cat, "ml", conf]
+        else:
+            unsure.append((idx, cat, conf))
+
+    # LLM pass for everything the ML model wasn't sure about, several requests at once.
+    llm_answers = [("", 0.0)] * len(unsure)
+    model = llm.resolve_model(llm_model()) if use_llm and unsure and cats else None
+    if model:
+        items = [(df.at[idx, "description"], float(df.at[idx, "amount"]), cat or None) for idx, cat, _ in unsure]
+        llm_answers = llm.categorize_many(items, cats, model=model, workers=llm_parallel())
+    df.attrs["llm_model"] = model
+
+    for (idx, cat, conf), (lcat, lconf) in zip(unsure, llm_answers):
+        if lcat and lconf >= LLM_THRESHOLD:
+            df.loc[idx, ["category", "cat_source", "cat_confidence"]] = [lcat, "llm", lconf]
             continue
-
-        if llm_up and cats:
-            lcat, lconf = llm.categorize(
-                df.at[idx, "description"], float(df.at[idx, "amount"]), cats, hint=cat or None
-            )
-            if lcat and lconf >= LLM_THRESHOLD:
-                df.loc[idx, ["category", "cat_source", "cat_confidence"]] = [lcat, "llm", lconf]
-                continue
-
         # Final fallback: park the best guess (if any) but flag for a human.
         df.loc[idx, ["category", "cat_source", "cat_confidence", "needs_review"]] = [
             cat or None, "ml" if cat else None, conf if cat else None, 1,
         ]
     return df
+
+
+def llm_model() -> str:
+    """The model chosen in the app, else the configured default (availability is checked by llm.resolve_model)."""
+    return db.get_setting("llm_model") or LLM_MODEL
+
+
+def llm_parallel() -> int:
+    return max(1, int(db.get_setting("llm_parallel") or LLM_PARALLEL))

@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
-from config import LLM_BASE_URL, LLM_MAX_TOKENS, LLM_MODEL, LLM_TIMEOUT
+from config import LLM_BASE_URL, LLM_MAX_TOKENS, LLM_MODEL, LLM_PARALLEL, LLM_TIMEOUT
 
 
 def is_available() -> bool:
@@ -14,6 +15,45 @@ def is_available() -> bool:
         return requests.get(f"{LLM_BASE_URL}/models", timeout=3).ok
     except requests.RequestException:
         return False
+
+
+def list_models() -> list[dict]:
+    """Chat-capable models the server offers: [{id, loaded}], loaded first. [] when unreachable.
+
+    Uses LM Studio's /api/v0/models (which reports load state) and falls back to the standard
+    /v1/models list (loaded=None) for other OpenAI-compatible servers. Embedding models are skipped.
+    """
+    root = LLM_BASE_URL.rstrip("/").removesuffix("/v1")
+    try:
+        r = requests.get(f"{root}/api/v0/models", timeout=3)
+        r.raise_for_status()
+        models = [{"id": m["id"], "loaded": m.get("state") == "loaded"}
+                  for m in r.json()["data"] if m.get("type") != "embeddings"]
+    except (requests.RequestException, KeyError, ValueError):
+        try:
+            r = requests.get(f"{LLM_BASE_URL}/models", timeout=3)
+            r.raise_for_status()
+            models = [{"id": m["id"], "loaded": None} for m in r.json()["data"]]
+        except (requests.RequestException, KeyError, ValueError):
+            return []
+    models = [m for m in models if "embed" not in m["id"].lower()]
+    return sorted(models, key=lambda m: not m["loaded"])
+
+
+def resolve_model(preferred: str | None = None, models: list[dict] | None = None) -> str | None:
+    """`preferred` (default LLM_MODEL) if the server offers it, else the loaded model, else the first listed.
+
+    Returns None when the server is unreachable or offers no chat models.
+    """
+    preferred = preferred or LLM_MODEL
+    models = list_models() if models is None else models
+    if not models:
+        return None
+    ids = [m["id"] for m in models]
+    if preferred in ids:
+        return preferred
+    loaded = [m["id"] for m in models if m["loaded"]]
+    return loaded[0] if loaded else ids[0]
 
 
 def _extract_json(text: str) -> dict | None:
@@ -28,7 +68,8 @@ def _extract_json(text: str) -> dict | None:
         return None
 
 
-def categorize(description: str, amount: float, categories: list[str], hint: str | None = None) -> tuple[str, float]:
+def categorize(description: str, amount: float, categories: list[str], hint: str | None = None,
+               model: str | None = None) -> tuple[str, float]:
     """Ask the local LLM to pick a category. Returns (category, confidence 0-1).
 
     Returns ('', 0.0) on any failure so the pipeline falls through to manual review.
@@ -48,7 +89,7 @@ def categorize(description: str, amount: float, categories: list[str], hint: str
         r = requests.post(
             f"{LLM_BASE_URL}/chat/completions",
             json={
-                "model": LLM_MODEL,
+                "model": model or LLM_MODEL,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
                 "temperature": 0.0,
                 "max_tokens": LLM_MAX_TOKENS,
@@ -73,3 +114,12 @@ def categorize(description: str, amount: float, categories: list[str], hint: str
     except (TypeError, ValueError):
         conf = 0.0
     return lookup[cat.lower()], conf
+
+
+def categorize_many(items: list[tuple[str, float, str | None]], categories: list[str], model: str | None = None,
+                    workers: int = LLM_PARALLEL) -> list[tuple[str, float]]:
+    """categorize() for each (description, amount, hint), up to `workers` requests at once. Results keep input order."""
+    if not items:
+        return []
+    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
+        return list(pool.map(lambda it: categorize(it[0], it[1], categories, hint=it[2], model=model), items))

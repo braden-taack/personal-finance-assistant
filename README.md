@@ -26,6 +26,7 @@ a copy is saved as `data/finance.pre-v<N>-backup.db`.
   `paychecks` table. It seeds the 22 budget categories, the 4 banks, and the current month's budget and paychecks.
   Old `account` values that name a bank (e.g. `amex`) become that bank. Old rows stored as `kind='income'` are kept
   but left out of budgets, since income now lives in `paychecks`.
+- **v3**: `settings` table (LLM model choice, parallel request count).
 
 ## Pages
 - **Dashboard**: Month or Year view. Shows Summary by Category (Budget / Actual / Difference, green under budget,
@@ -64,11 +65,19 @@ Only date, description and amount are required. Amount can be one signed column,
 (Date, Bank, Description, Category, Amount). Categories that match a budget category (case-insensitive) are
 stored as trusted `import` labels; anything else goes through the cascade.
 
+## LLM model
+The default is `nvidia/nemotron-3-nano-4b` (`FT_LLM_MODEL`). If LM Studio doesn't offer it, the app uses whichever
+model is loaded there. Pick another model with **LLM model** in the sidebar (● = loaded); the choice is saved
+in the `settings` table (schema v3). The import message names the model that was used.
+
 ## How categorization works
 1. A CSV category that matches a budget category is kept as an `import` label.
 2. **Savings rules**: Investing / Savings transfers are categorized by rule (`rule`).
 3. **ML model** (TF-IDF word + char n-grams -> logistic regression). Confidence >= 70% is accepted.
 4. **LM Studio LLM** picks from the category list and returns JSON with a confidence. >= 60% is accepted.
+   All rows the ML model was unsure about are sent together, up to 4 requests at once (Categories & Model page,
+   or `FT_LLM_PARALLEL`). LM Studio only runs them concurrently when its **Max Concurrent Predictions** setting
+   (model load settings) is at least that high; otherwise they queue.
 5. **Manual review queue**: anything left is flagged with the best guess pre-selected. Confirmed labels are saved
    as `manual` and feed the next retrain. The model trains only on `manual` / `import` labels, never on its own guesses.
 

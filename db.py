@@ -131,7 +131,12 @@ def _migrate_v2(c: sqlite3.Connection) -> None:
                 c.execute("INSERT INTO paychecks VALUES(?,?,?,?,?,?)", (month, period, cat, sub, amt, i))
 
 
-MIGRATIONS = [_migrate_v1, _migrate_v2]   # index + 1 == version reached after running it
+def _migrate_v3(c: sqlite3.Connection) -> None:
+    """App settings chosen in the UI (e.g. the LLM model)."""
+    c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+
+
+MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3]   # index + 1 == version reached after running it
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -228,6 +233,19 @@ def rename_category(old: str, new: str) -> None:
         c.execute("UPDATE categories SET name=? WHERE name=?", (new, old))
         c.execute("UPDATE transactions SET category=? WHERE category=?", (new, old))
         c.execute("UPDATE budgets SET category=? WHERE category=?", (new, old))
+
+
+# ---------- settings ----------
+def get_setting(key: str, default: str | None = None) -> str | None:
+    with connect() as c:
+        r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return r["value"] if r else default
+
+
+def set_setting(key: str, value: str) -> None:
+    with connect() as c:
+        c.execute("INSERT INTO settings(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                  (key, str(value)))
 
 
 # ---------- banks ----------

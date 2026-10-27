@@ -35,7 +35,7 @@ assert sqlite3.connect(old).execute("PRAGMA user_version").fetchone()[0] == 0
 db.DB_PATH = old
 db.init_db()
 db.init_db()  # second run must be a no-op
-assert db.schema_version() == db.SCHEMA_VERSION == 2
+assert db.schema_version() == db.SCHEMA_VERSION == 3
 tx_old = db.fetch_transactions().set_index("description")
 assert len(tx_old) == 3, "migration lost rows"
 assert tx_old.loc["KROGER 0932", "bank"] == "AMEX" and pd.isna(tx_old.loc["CHIPOTLE 2231", "bank"])
@@ -44,7 +44,7 @@ assert tx_old.loc["CHIPOTLE 2231", "category"] == "Dining"  # legacy category ke
 assert db.fetch_budgets("2026-01")["amount"].tolist() == [300.0]
 assert set(config.DEFAULT_CATEGORIES) <= set(db.get_categories())
 assert "PAYROLL" not in db.fetch_expenses()["description"].tolist()  # legacy income rows stay out of actuals
-assert (tmp / "old.pre-v2-backup.db").exists()
+assert (tmp / f"old.pre-v{db.SCHEMA_VERSION}-backup.db").exists()
 print("migration: OK")
 
 # ---------------------------------------------------------------- 2. fresh database + seeds
@@ -204,6 +204,56 @@ print("shared expenses: OK")
 
 sk = reports.sankey(2030)
 assert sk and "Gross income" in sk["labels"] and "Take-home" in sk["labels"]
+
+# ---------------------------------------------------------------- 8b. LLM model choice + parallel requests
+import threading  # noqa: E402
+import time  # noqa: E402
+
+import llm  # noqa: E402
+
+offered = [{"id": "qwen/qwen3.8-27b", "loaded": True}, {"id": "nvidia/nemotron-3-nano-4b", "loaded": False}]
+assert config.LLM_MODEL == "nvidia/nemotron-3-nano-4b" and config.LLM_PARALLEL == 4
+assert llm.resolve_model(None, offered) == "nvidia/nemotron-3-nano-4b"           # default when offered
+assert llm.resolve_model(None, offered[:1]) == "qwen/qwen3.8-27b"               # else whatever is loaded
+assert llm.resolve_model("gone/model", [{"id": "a", "loaded": False}, {"id": "b", "loaded": True}]) == "b"
+assert llm.resolve_model(None, []) is None                                     # LM Studio offline
+assert llm.resolve_model() is None                                             # (FT_LLM_URL is unreachable here)
+
+active, peak, lock = 0, 0, threading.Lock()
+
+
+def fake_categorize(desc, amount, cats, hint=None, model=None):
+    global active, peak
+    with lock:
+        active += 1
+        peak = max(peak, active)
+    time.sleep(0.15)
+    with lock:
+        active -= 1
+    return ("Golf", 0.9) if "GOLF" in desc else ("", 0.0)
+
+
+real_categorize, real_resolve = llm.categorize, llm.resolve_model
+llm.categorize, llm.resolve_model = fake_categorize, lambda preferred=None, models=None: "fake/model"
+try:
+    items = [(f"ROW {i}{' GOLF' if i % 3 == 0 else ''}", 1.0, None) for i in range(10)]
+    t = time.time()
+    res = llm.categorize_many(items, ["Golf"], workers=4)
+    assert peak == 4 and time.time() - t < 0.15 * 10 / 2                        # really concurrent, capped at 4
+    assert [r[0] for r in res] == ["Golf" if i % 3 == 0 else "" for i in range(10)]  # input order kept
+
+    db.set_setting("llm_parallel", 2)
+    peak = 0
+    frame = pd.DataFrame({"description": [f"QQQ MYSTERY GOLF {i}" for i in range(6)], "amount": 20.0,
+                          "category": None, "date": "2026-10-20", "bank": "AMEX"})
+    out = pipeline.categorize_frame(frame, use_llm=True)
+    assert peak == 2 and out.attrs["llm_model"] == "fake/model"                 # setting overrides the default 4
+    assert (out["cat_source"] == "llm").all() and (out["category"] == "Golf").all()
+    db.set_setting("llm_model", "picked/in-ui")
+    assert pipeline.llm_model() == "picked/in-ui"
+finally:
+    llm.categorize, llm.resolve_model = real_categorize, real_resolve
+print("LLM model choice + parallel requests: OK")
 
 # ---------------------------------------------------------------- 9. manual label -> retrain picks it up
 rid = int(db.fetch_review_queue().iloc[0]["id"])

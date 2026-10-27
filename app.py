@@ -28,7 +28,35 @@ PAGE = st.sidebar.radio(
 q = len(db.fetch_review_queue())
 if q:
     st.sidebar.warning(f"{q} transaction(s) need review")
-st.sidebar.caption(f"LLM: {'🟢 reachable' if llm.is_available() else '🔴 offline'} ({LLM_BASE_URL})")
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def llm_models() -> list[dict]:
+    return llm.list_models()
+
+
+def sidebar_llm() -> None:
+    """LLM status + model selector. The choice is saved; an unavailable choice falls back to the loaded model."""
+    models = llm_models()
+    if not models:
+        st.sidebar.caption(f"LLM: 🔴 offline ({LLM_BASE_URL})")
+        return
+    chosen = pipeline.llm_model()
+    effective = llm.resolve_model(chosen, models)
+    ids = [m["id"] for m in models]
+    loaded = {m["id"] for m in models if m["loaded"]}
+    pick = st.sidebar.selectbox("LLM model", ids, index=ids.index(effective), key="llm_model_select",
+                                format_func=lambda i: f"{i} ●" if i in loaded else i,
+                                help="● = loaded in LM Studio. Others are loaded on first use.")
+    if pick != effective:
+        db.set_setting("llm_model", pick)
+        effective = pick
+    if chosen != effective and pick == llm.resolve_model(chosen, models):
+        st.sidebar.caption(f"{chosen} isn't available in LM Studio, so the loaded model is used.")
+    st.sidebar.caption(f"LLM: 🟢 reachable ({LLM_BASE_URL}) · {pipeline.llm_parallel()} parallel requests")
+
+
+sidebar_llm()
 
 THIS_MONTH = date.today().strftime("%Y-%m")
 PERIOD_LABEL = {"mid": "Mid Month Paycheck", "end": "End of Month Paycheck"}
@@ -594,7 +622,8 @@ def page_import():
                              decisions.get(d["new_idx"])))
         st.success(f"Imported {n} rows ({len(skip)} skipped). "
                    f"Sources: {done['cat_source'].value_counts(dropna=False).to_dict()}. "
-                   f"{int(done['needs_review'].sum())} need review.")
+                   f"{int(done['needs_review'].sum())} need review."
+                   + (f" LLM: {done.attrs['llm_model']}." if done.attrs.get("llm_model") else ""))
         for k in ("imp_clean", "imp_dups", "imp_transfers"):
             st.session_state.pop(k, None)
 
@@ -731,6 +760,12 @@ def page_model():
         st.subheader("Classifier")
         st.write(f"ML threshold **{ML_THRESHOLD:.0%}** → LLM threshold **{LLM_THRESHOLD:.0%}** → manual review. "
                  "(Set via `FT_ML_THRESHOLD` / `FT_LLM_THRESHOLD`.)")
+        par = st.number_input("Parallel LLM requests", min_value=1, max_value=16, value=pipeline.llm_parallel(),
+                              help="How many uncertain rows are sent to LM Studio at once. LM Studio only runs them "
+                                   "concurrently when its Max Concurrent Predictions setting is at least this high.")
+        if par != pipeline.llm_parallel():
+            db.set_setting("llm_parallel", int(par))
+            st.rerun()
         lab = db.fetch_labeled()
         st.metric("Labeled rows available", len(lab))
         st.caption("Training uses manual + imported labels only, so the model never trains on its own guesses.")

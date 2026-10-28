@@ -51,7 +51,7 @@ a copy is saved as `data/finance.pre-v<N>-backup.db`.
   retraining).
 
 ## Assistant
-The **Assistant** page is a chat agent that uses the same LM Studio model as the rest of the app, at temperature 0
+The **Assistant** is a chat bubble fixed to the bottom-right of every page (click to expand, **—** to shrink it back). It is an agent that uses the same LM Studio model as the rest of the app, at temperature 0
 (`agent.py`, `agent_tools.py`, `llm.chat`). It has no data of its own; it works through tools:
 
 - **Read tools** compute every figure with pandas from the database: overview, transaction search, sum / avg / min /

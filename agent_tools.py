@@ -275,6 +275,7 @@ def get_overview(ctx: Context) -> dict:
         "months_with_expenses": sorted(db.transaction_months()),
         "categories": [{"name": r["name"], "is_savings": bool(r["is_savings"])} for _, r in cats.iterrows()
                        if r["active"] and r["kind"] == "expense"],
+        "active_category_count": int(((cats["active"] == 1) & (cats["kind"] == "expense")).sum()),
         "retired_categories": [r["name"] for _, r in cats.iterrows() if not r["active"]],
         "banks": db.get_banks(),
         "review_queue_count": len(db.fetch_review_queue()),

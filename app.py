@@ -26,7 +26,7 @@ db.init_db()
 PAGE = st.sidebar.radio(
     "Go to",
     ["Dashboard", "Budgets", "Paychecks", "Shared expenses", "Import CSV", "Review queue", "Transactions",
-     "Categories & Model", "Assistant"],
+     "Categories & Model"],
 )
 q = len(db.fetch_review_queue())
 if q:
@@ -787,83 +787,112 @@ def page_transactions():
             st.rerun()
 
 
-# ============================================================ Assistant
-def page_assistant():
-    st.title("Assistant")
-    st.caption("Ask about your money or ask for changes. It answers only from your database (temperature 0), shows the "
-               "tool calls behind every answer, and never changes anything until you approve it.")
-    model = llm.resolve_model(pipeline.llm_model())
-    if not model:
-        st.error(f"The LLM server isn't reachable at {LLM_BASE_URL}. Start LM Studio's server and reload.")
-        return
+# ============================================================ Assistant (floating chat widget)
+ASSISTANT_CSS = """
+<style>
+.st-key-assistant_fab, .st-key-assistant_panel { position: fixed; right: 1.5rem; bottom: 1.5rem; z-index: 1000000; }
+.st-key-assistant_fab { width: auto; }
+.st-key-assistant_fab button { width: 3.6rem; height: 3.6rem; border-radius: 50%; font-size: 1.6rem; padding: 0;
+    box-shadow: 0 4px 14px rgba(0,0,0,.35); }
+.st-key-assistant_panel { width: min(430px, calc(100vw - 2rem)); max-height: calc(100vh - 3rem); overflow-y: auto;
+    padding: .75rem; border-radius: 14px; border: 1px solid rgba(128,128,128,.4);
+    box-shadow: 0 8px 28px rgba(0,0,0,.4); background: var(--assistant-bg, Canvas); color: CanvasText; }
+.st-key-assistant_panel [data-testid="stChatInput"] { position: static; }
+</style>
+"""
+
+
+def assistant_widget() -> None:
+    """A chat bubble fixed to the bottom-right of every page. Click to expand; minimize to shrink it back."""
+    st.markdown(ASSISTANT_CSS, unsafe_allow_html=True)
     ag = st.session_state.get("assistant")
-    if ag is None:
-        ag = st.session_state["assistant"] = agent_mod.Agent(model)
-        st.session_state["assistant_log"] = []
-    ag.model = model
-    log = st.session_state["assistant_log"]
-    st.sidebar.caption(f"Assistant model: {model} · temperature 0")
-    if st.sidebar.button("New conversation"):
-        del st.session_state["assistant"], st.session_state["assistant_log"]
-        st.rerun()
+    n_pending = len(ag.ctx.open_actions()) if ag else 0
+    if not st.session_state.get("assistant_open"):
+        with st.container(key="assistant_fab"):
+            if st.button("💬" + (f" {n_pending}" if n_pending else ""), key="assistant_show",
+                         help="Open the finance assistant" + (f" ({n_pending} action(s) waiting for approval)" if n_pending else "")):
+                st.session_state["assistant_open"] = True
+                st.rerun()
+        return
 
-    def show_calls(calls):
-        with st.expander(f"Data used ({len(calls)} tool call(s))"):
-            for c in calls:
-                st.markdown(f"**{c.name}** `{json.dumps(c.args)}`")
-                st.json(c.result, expanded=False)
+    with st.container(key="assistant_panel"):
+        model = llm.resolve_model(pipeline.llm_model())
+        h1, h2, h3 = st.columns([5, 1, 1], vertical_alignment="center")
+        h1.markdown("**Assistant**  \n" + (f"<small>{model} · temperature 0</small>" if model else ""),
+                    unsafe_allow_html=True)
+        if h2.button("🗑", key="assistant_new", help="Start a new conversation"):
+            st.session_state.pop("assistant", None)
+            st.session_state.pop("assistant_log", None)
+            st.rerun()
+        if h3.button("—", key="assistant_hide", help="Shrink back to the icon"):
+            st.session_state["assistant_open"] = False
+            st.rerun()
+        if not model:
+            st.error(f"The LLM server isn't reachable at {LLM_BASE_URL}. Start LM Studio's server.")
+            return
+        if ag is None:
+            ag = st.session_state["assistant"] = agent_mod.Agent(model)
+            st.session_state["assistant_log"] = []
+        ag.model = model
+        log = st.session_state["assistant_log"]
 
-    def show_message(m):
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
-            if m.get("staged"):
-                st.info("Proposed only. Nothing has changed until you approve it under Pending actions below.")
-            if m.get("ungrounded"):
-                st.warning("Couldn't verify these figures against the database: " + ", ".join(m["ungrounded"]))
-            if m.get("calls"):
-                show_calls(m["calls"])
+        def show_message(m):
+            with st.chat_message(m["role"]):
+                st.markdown(m["content"])
+                if m.get("staged"):
+                    st.info("Proposed only. Nothing has changed until you approve it under Pending actions.")
+                if m.get("ungrounded"):
+                    st.warning("Couldn't verify these figures against the database: " + ", ".join(m["ungrounded"]))
+                if m.get("calls"):
+                    with st.expander(f"Data used ({len(m['calls'])} tool call(s))"):
+                        for c in m["calls"]:
+                            st.markdown(f"**{c.name}** `{json.dumps(c.args)}`")
+                            st.json(c.result, expanded=False)
 
-    if not log:
-        st.info("Try: *How much did I spend on groceries each month this year?* · *What's my highest transaction "
-                "this month?* · *Am I over budget anywhere this month?* · *Go through my review queue.*")
-    for m in log:
-        show_message(m)
+        pending = ag.ctx.open_actions()
+        question = None
+        with st.container(height=380 if not pending else 260, border=False):
+            if not log:
+                st.caption("Ask about your money or ask for changes. It answers only from your database and "
+                           "never changes anything until you approve. Try: *How much did I spend on groceries each "
+                           "month this year?* or *Am I over budget this month?*")
+            for m in log:
+                show_message(m)
+            question = st.session_state.pop("assistant_question", None)
+            if question:
+                with st.chat_message("assistant"), st.spinner("Looking at your data…"):
+                    turn = ag.ask(question)
+                log.append({"role": "assistant", "content": turn.answer, "calls": turn.calls,
+                            "ungrounded": turn.ungrounded, "staged": turn.staged})
 
-    question = st.chat_input("Ask about your finances…")
-    if question:
-        log.append({"role": "user", "content": question})
-        with st.chat_message("user"):
-            st.markdown(question)
-        with st.chat_message("assistant"), st.spinner("Looking at your data…"):
-            turn = ag.ask(question)
-        log.append({"role": "assistant", "content": turn.answer, "calls": turn.calls, "ungrounded": turn.ungrounded,
-                    "staged": turn.staged})
-        st.rerun()
+        if question:
+            st.rerun()   # redraw with the new answer and any pending actions
 
-    pending = ag.ctx.open_actions()
-    if pending:
-        st.divider()
-        st.subheader(f"Pending actions ({len(pending)})")
-        st.caption("Proposed by the assistant, checked against your data, not applied yet.")
         for a in pending:
             with st.container(border=True):
-                st.markdown(f"**{a['summary']}**")
+                st.markdown(f"**Pending:** {a['summary']}")
                 if a["preview"]:
                     st.dataframe(pd.DataFrame(a["preview"]), hide_index=True, width="stretch")
                     if a["rows_affected"] and a["rows_affected"] > len(a["preview"]):
                         st.caption(f"Showing {len(a['preview'])} of {a['rows_affected']} rows.")
-                ok_col, no_col, _ = st.columns([1, 1, 4])
-                if ok_col.button("Approve", key=f"ap_{a['id']}", type="primary"):
+                ok_col, no_col = st.columns(2)
+                if ok_col.button("Approve", key=f"ap_{a['id']}", type="primary", width="stretch"):
                     ok, msg = agent_tools.apply_action(a)
                     ag.note(f"Action {a['id']} ({a['summary']}) was approved and "
                             + (f"applied. {msg}" if ok else f"FAILED: {msg}"))
                     log.append({"role": "assistant", "content": ("✅ " if ok else "❌ ") + f"{a['summary']}: {msg}"})
                     st.rerun()
-                if no_col.button("Reject", key=f"rj_{a['id']}"):
+                if no_col.button("Reject", key=f"rj_{a['id']}", width="stretch"):
                     agent_tools.reject_action(a)
                     ag.note(f"Action {a['id']} ({a['summary']}) was rejected by the user; nothing changed.")
                     log.append({"role": "assistant", "content": f"Rejected: {a['summary']}"})
                     st.rerun()
+
+        typed = st.chat_input("Ask about your finances…", key="assistant_input")
+        if typed:
+            log.append({"role": "user", "content": typed})
+            st.session_state["assistant_question"] = typed
+            st.rerun()
 
 
 # ============================================================ Categories & Model
@@ -977,5 +1006,5 @@ def page_model():
     "Review queue": page_review,
     "Transactions": page_transactions,
     "Categories & Model": page_model,
-    "Assistant": page_assistant,
 }[PAGE]()
+assistant_widget()

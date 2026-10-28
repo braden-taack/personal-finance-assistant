@@ -838,9 +838,11 @@ def assistant_widget() -> None:
 
         def show_message(m):
             with st.chat_message(m["role"]):
-                st.markdown(m["content"])
+                st.markdown(m["content"].replace("$", "\\$"))   # two bare $ would render as LaTeX math
                 if m.get("staged"):
                     st.info("Proposed only. Nothing has changed until you approve it under Pending actions.")
+                if m.get("events"):
+                    st.caption("Checks: " + " ".join(m["events"]))
                 if m.get("ungrounded"):
                     st.warning("Couldn't verify these figures against the database: " + ", ".join(m["ungrounded"]))
                 if m.get("calls"):
@@ -863,7 +865,7 @@ def assistant_widget() -> None:
                 with st.chat_message("assistant"), st.spinner("Looking at your data…"):
                     turn = ag.ask(question)
                 log.append({"role": "assistant", "content": turn.answer, "calls": turn.calls,
-                            "ungrounded": turn.ungrounded, "staged": turn.staged})
+                            "ungrounded": turn.ungrounded, "staged": turn.staged, "events": turn.events})
 
         if question:
             st.rerun()   # redraw with the new answer and any pending actions

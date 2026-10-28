@@ -428,7 +428,10 @@ def budget_vs_actual(ctx: Context, month: str | None = None, year: int | None = 
     body = summary.drop(index=reports.TOTAL)
     body = body[(body["Budget"] != 0) | (body["Actual"] != 0)]
     t1 = reports.table1(months, summary)
+    over = body[body["Difference"] < 0]
     return {"months": months,
+            "categories_over_budget": len(over),
+            "total_overspent": round(float(-over["Difference"].sum()), 2),   # sum of the overspend in over-budget categories
             "categories": [{"category": c, "budget": r["Budget"], "actual": r["Actual"], "difference": r["Difference"],
                             "over_budget": bool(r["Difference"] < 0)} for c, r in body.iterrows()],
             "total": {"budget": summary.loc[reports.TOTAL, "Budget"], "actual": summary.loc[reports.TOTAL, "Actual"],

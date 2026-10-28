@@ -42,7 +42,9 @@ from get_overview.
 and never "I changed ..." until a message tells you the action was approved and applied.
 7. Say which figure you used when it matters: "my share" (shared rows count {SHARED_SPLIT:.0%}) vs full amount. \
 Budget difference = Budget - Actual, positive = under budget.
-8. Be concise. Quote figures exactly as the tools return them, as dollars with 2 decimals. Use short tables or bullets \
+8. You cannot see why an earlier reply failed. If asked about your own errors, rely only on "[app notice]" messages \
+and otherwise say you don't know; never guess at a cause.
+9. Be concise. Quote figures exactly as the tools return them, as dollars with 2 decimals. Use short tables or bullets \
 for lists. Give no financial advice beyond what the data shows."""
 
 
@@ -125,6 +127,7 @@ class Turn:
     answer: str
     calls: list[ToolCall] = field(default_factory=list)
     ungrounded: list[str] = field(default_factory=list)
+    events: list[str] = field(default_factory=list)   # what went wrong along the way (empty replies, rejected figures)
     staged: list[int] = field(default_factory=list)   # ids of actions proposed this turn (not yet applied)
     error: str | None = None
 
@@ -159,6 +162,7 @@ class Agent:
         self.messages.append({"role": "user", "content": question})
         self.evidence.append(question)
         turn = Turn(answer="")
+        candidate: tuple[str, list[str]] | None = None   # newest non-empty answer that failed the figures check
         retries = 0
         for _ in range(AGENT_MAX_STEPS):
             try:
@@ -170,28 +174,43 @@ class Agent:
                 return turn
             content = _strip_think(msg.get("content"))
             calls = msg.get("tool_calls") or _text_tool_calls(msg.get("content") or "")
-            self.messages.append({"role": "assistant", "content": content or None, **({"tool_calls": calls} if calls else {})})
 
             if calls:
+                self.messages.append({"role": "assistant", "content": content or None, "tool_calls": calls})
                 for c in calls:
                     self._run_call(c, turn)
                 continue
 
-            bad = check_grounding(content, self.evidence) if content else []
-            if bad and retries < MAX_GROUNDING_RETRIES:
-                retries += 1
-                self.messages.append({"role": "user", "content": (
-                    f"[app notice] These figures in your answer do not appear in any tool result: {', '.join(bad)}. "
-                    "Do not state numbers you did not get from a tool. Fetch the real values with the right tool, "
-                    "or remove the claim and say the data isn't available. Then answer again.")})
-                continue
-            turn.answer = content or "I wasn't able to produce an answer."
-            turn.ungrounded = bad
-            return turn
+            if content:
+                self.messages.append({"role": "assistant", "content": content})
+                bad = check_grounding(content, self.evidence)
+                if not bad:
+                    return self._finish(turn, content, [])
+                candidate = (content, bad)
+                turn.events.append(f"Figures not found in the data were rejected: {', '.join(bad)}.")
+                nudge = (f"These figures in your answer do not appear in any tool result: {', '.join(bad)}. "
+                         "Do not state numbers you did not get from a tool (and do not add up figures yourself). "
+                         "Fetch the real values with the right tool, or remove the claim and say the data isn't "
+                         "available. Then answer again, briefly.")
+            else:   # reasoning models can spend the whole token budget thinking and return no answer text
+                turn.events.append("The model returned an empty reply.")
+                nudge = "Your last reply was empty. Give the final answer now, briefly, using only the tool results above."
+            if retries >= MAX_GROUNDING_RETRIES:
+                break
+            retries += 1
+            self.messages.append({"role": "user", "content": f"[app notice] {nudge}"})
 
-        turn.answer = ("I ran out of steps before finishing. Here is what I found so far: "
-                       + ("; ".join(f"{c.name} returned data" for c in turn.calls) or "nothing yet")
-                       + ". Try a narrower question.")
+        if candidate:   # better to show the newest answer with a visible warning than nothing
+            return self._finish(turn, *candidate)
+        turn.answer = ("The model didn't produce a readable answer"
+                       + (", though it did fetch data (see Data used)." if turn.calls else ".") + " Please try again.")
+        return self._finish(turn, turn.answer, [])
+
+    def _finish(self, turn: Turn, answer: str, ungrounded: list[str]) -> Turn:
+        turn.answer, turn.ungrounded = answer, ungrounded
+        if turn.events:   # so the model can answer "what went wrong?" from facts, not guesses
+            self.note("About your previous answer: " + " ".join(turn.events)
+                      + (" The figures shown to the user carry a warning." if ungrounded else ""))
         return turn
 
     def _run_call(self, call: dict, turn: Turn) -> None:

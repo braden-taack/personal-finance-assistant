@@ -226,6 +226,27 @@ def broken(messages, tools=None, model=None):
 t = agent.Agent("fake", chat=broken).ask("hi")
 assert t.error == "offline" and "couldn't reach" in t.answer
 
+# 5b) the reported bug: a self-computed total is rejected, then the model replies with nothing (it spent its tokens
+#     thinking). The user must still get the first answer, flagged, plus a note so the model can explain truthfully.
+ag = agent.Agent("fake", chat=scripted([tool_call("get_overview"),
+                                         {"role": "assistant", "content": "You have 3 things worth $1,483.78 in total."},
+                                         {"role": "assistant", "content": "", "reasoning_content": "hmm"},
+                                         {"role": "assistant", "content": ""}]))
+t = ag.ask("total?")
+assert t.answer.startswith("You have 3") and t.ungrounded == ["$1,483.78"], t
+assert any("empty reply" in e for e in t.events) and "[app notice] About your previous answer" in ag.messages[-1]["content"]
+
+# an empty reply followed by a real one is recovered; all-empty gives an honest message instead of a vague one
+ag = agent.Agent("fake", chat=scripted([{"role": "assistant", "content": ""}, {"role": "assistant", "content": "Hello."}]))
+assert ag.ask("hi").answer == "Hello."
+t = agent.Agent("fake", chat=scripted([tool_call("get_overview")] + [{"role": "assistant", "content": ""}] * 3)).ask("hi")
+assert "didn't produce a readable answer" in t.answer and "Data used" in t.answer, t.answer
+
+# the over-budget total comes from the tool, so the model never has to add it up
+r = call("budget_vs_actual", month=M)
+over = [c for c in r["categories"] if c["over_budget"]]
+assert r["categories_over_budget"] == len(over) and close(r["total_overspent"], -sum(c["difference"] for c in over)), r
+
 # 6) every tool's schema is valid JSON the server can take
 for s in at.schemas():
     json.dumps(s)

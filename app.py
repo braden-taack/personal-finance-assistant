@@ -684,20 +684,103 @@ def page_transactions():
     if src != "All":
         tx = tx[tx["cat_source"] == src]
     tx = tx.assign(effective=db.effective_amount(tx))
-    st.dataframe(tx[["id", "date", "bank", "description", "category", "amount", "effective", "shared", "shared_settled",
-                     "cat_source", "cat_confidence", "kind"]].rename(columns={"effective": "my share"}),
-                 hide_index=True, width="stretch")
     if (tx["kind"] == "income").any():
         st.caption("Rows with kind = income were imported before paychecks existed; they are excluded from budgets.")
-    with st.expander("Edit one transaction"):
-        tid = st.number_input("Transaction id", min_value=0, step=1)
-        newcat = st.selectbox("New category", cats, index=None, placeholder="Choose…")
-        a, b = st.columns(2)
-        if a.button("Re-categorize") and newcat and tid:
-            db.set_category(int(tid), newcat)
+
+    ver = st.session_state.get("tx_ver", 0)   # bumped after every save so stale editor state is dropped
+    select_all = st.checkbox(f"Select all {len(tx)} shown")
+    banks = sorted((set(db.get_banks()) | set(tx["bank"].dropna())) - {""})
+    cat_opts = cats + sorted(set(tx["category"].dropna()) - set(cats))   # keep retired categories visible
+    ed = pd.DataFrame({
+        "Select": select_all,
+        "Date": tx["date"].dt.date.values,
+        "Bank": tx["bank"].values,
+        "Description": tx["description"].values,
+        "Category": tx["category"].values,
+        "Amount": tx["amount"].values,
+        "Kind": tx["kind"].values,
+        "Shared": tx["shared"].astype(bool).values,
+        "Settled": tx["shared_settled"].astype(bool).values,
+        "My share": tx["effective"].values,
+        "Source": tx["cat_source"].values,
+        "Confidence": tx["cat_confidence"].values,
+    }, index=tx["id"].values)
+    key = f"tx_{ver}_{hash((cat, bank, text, src, select_all))}"
+    out = st.data_editor(
+        ed, key=key, hide_index=True, width="stretch", height=520, num_rows="fixed",
+        disabled=["My share", "Source", "Confidence"],
+        column_config={
+            "Date": st.column_config.DateColumn(format="YYYY-MM-DD", required=True),
+            "Bank": st.column_config.SelectboxColumn(options=banks),
+            "Description": st.column_config.TextColumn(required=True),
+            "Category": st.column_config.SelectboxColumn(options=cat_opts),
+            "Amount": st.column_config.NumberColumn(format="dollar", required=True),
+            "Kind": st.column_config.SelectboxColumn(options=["expense", "income"], required=True),
+            "My share": st.column_config.NumberColumn(format="dollar"),
+            "Confidence": st.column_config.NumberColumn(format="percent"),
+        })
+
+    fields = {"Date": "date", "Bank": "bank", "Description": "description", "Category": "category",
+              "Amount": "amount", "Kind": "kind", "Shared": "shared", "Settled": "shared_settled"}
+
+    def changed_cells() -> dict[int, dict]:
+        edits: dict[int, dict] = {}
+        for col, field in fields.items():
+            diff = ~((out[col] == ed[col]) | (out[col].isna() & ed[col].isna()))
+            for tid in out.index[diff]:
+                v = out.at[tid, col]
+                v = None if pd.isna(v) else v
+                if field == "date" and v is not None:
+                    v = pd.Timestamp(v).date().isoformat()
+                edits.setdefault(int(tid), {})[field] = v
+        return edits
+
+    edits = changed_cells()
+    sel = [int(i) for i in out.index[out["Select"]]]
+    if st.button(f"Save {len(edits)} edited row(s)", type="primary", disabled=not edits):
+        bad = [t for t, e in edits.items()
+               if ("description" in e and not str(e["description"] or "").strip())
+               or any(k in e and e[k] is None for k in ("date", "amount", "kind"))]
+        if bad:
+            st.error(f"Date, description, amount and kind can't be empty (transaction id {bad[0]}).")
+        else:
+            for tid, e in edits.items():
+                if "description" in e:
+                    e["description"] = e["description"].strip()
+                db.update_transactions([tid], e)
+            st.session_state["tx_ver"] = ver + 1
             st.rerun()
-        if b.button("Delete", type="secondary") and tid:
-            db.delete_transaction(int(tid))
+
+    with st.expander(f"Bulk edit {len(sel)} selected", expanded=bool(sel)):
+        if not sel:
+            st.caption("Tick the Select boxes in the table first.")
+        st.caption("Only the fields you fill in are changed; the rest are left as they are. "
+                   "Unsaved cell edits above are discarded when a bulk action is applied.")
+        b1, b2, b3, b4 = st.columns(4)
+        b_cat = b1.selectbox("Category", cat_opts, index=None, placeholder="(no change)", key=f"bk_cat_{ver}")
+        b_bank = b2.selectbox("Bank", banks, index=None, placeholder="(no change)", key=f"bk_bank_{ver}")
+        b_kind = b3.selectbox("Kind", ["expense", "income"], index=None, placeholder="(no change)", key=f"bk_kind_{ver}")
+        b_shared = b4.selectbox("Shared", ["(no change)", "Shared", "Not shared"], key=f"bk_sh_{ver}")
+        b5, b6, b7 = st.columns(3)
+        b_date = b5.date_input("Date", value=None, key=f"bk_date_{ver}")
+        b_desc = b6.text_input("Description", key=f"bk_desc_{ver}", placeholder="(no change)")
+        b_settled = b7.selectbox("Settled", ["(no change)", "Settled", "Not settled"], key=f"bk_se_{ver}")
+        bulk = {k: v for k, v in {
+            "category": b_cat, "bank": b_bank, "kind": b_kind,
+            "date": b_date.isoformat() if b_date else None,
+            "description": b_desc.strip() or None,
+            "shared": {"Shared": True, "Not shared": False}.get(b_shared),
+            "shared_settled": {"Settled": True, "Not settled": False}.get(b_settled),
+        }.items() if v is not None}
+        a, d = st.columns([1, 1])
+        if a.button(f"Apply to {len(sel)} row(s)", type="primary", disabled=not sel or not bulk):
+            db.update_transactions(sel, bulk)
+            st.session_state["tx_ver"] = ver + 1
+            st.rerun()
+        confirm = d.checkbox("Confirm delete", key=f"bk_del_ok_{ver}")
+        if d.button(f"Delete {len(sel)} row(s)", disabled=not sel or not confirm):
+            db.delete_transactions(sel)
+            st.session_state["tx_ver"] = ver + 1
             st.rerun()
 
 

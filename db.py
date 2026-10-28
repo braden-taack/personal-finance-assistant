@@ -388,6 +388,52 @@ def delete_transaction(tx_id: int) -> None:
         c.execute("DELETE FROM transactions WHERE id=?", (tx_id,))
 
 
+EDITABLE_FIELDS = ("date", "bank", "description", "amount", "kind", "category", "shared", "shared_settled")
+
+
+def update_transactions(ids: Iterable[int], changes: dict) -> int:
+    """Apply `changes` (any of EDITABLE_FIELDS) to every row in `ids`; returns rows touched.
+
+    A category change is a manual label (so it trains the model and leaves the review queue).
+    Un-sharing clears the settlement, and only shared rows can be settled.
+    """
+    unknown = set(changes) - set(EDITABLE_FIELDS)
+    if unknown:
+        raise ValueError(f"Not editable: {sorted(unknown)}")
+    ids = [int(i) for i in ids]
+    plain = {k: v for k, v in changes.items() if k not in ("category", "shared", "shared_settled")}
+    if "amount" in plain:
+        plain["amount"] = float(plain["amount"])
+    sets, vals = [f"{k}=?" for k in plain], list(plain.values())
+    if "category" in changes:
+        cat = changes["category"] or None
+        sets += ["category=?", "cat_source=?", "cat_confidence=?", "needs_review=0"]
+        vals += [cat, "manual" if cat else None, 1.0 if cat else None]
+    with connect() as c:
+        for i in ids:
+            if sets:
+                c.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE id=?", [*vals, i])
+            if "shared" in changes:
+                if changes["shared"]:
+                    c.execute("UPDATE transactions SET shared=1 WHERE id=?", (i,))
+                else:
+                    c.execute("UPDATE transactions SET shared=0, shared_settled=0, shared_settled_date=NULL WHERE id=?", (i,))
+            if "shared_settled" in changes:
+                if changes["shared_settled"]:
+                    c.execute("UPDATE transactions SET shared_settled=1, shared_settled_date=COALESCE(shared_settled_date, ?) "
+                              "WHERE id=? AND shared=1", (date.today().isoformat(), i))
+                else:
+                    c.execute("UPDATE transactions SET shared_settled=0, shared_settled_date=NULL WHERE id=?", (i,))
+    return len(ids)
+
+
+def delete_transactions(ids: Iterable[int]) -> int:
+    ids = [(int(i),) for i in ids]
+    with connect() as c:
+        c.executemany("DELETE FROM transactions WHERE id=?", ids)
+    return len(ids)
+
+
 # ---------- shared expenses ----------
 def set_shared(ids: Iterable[int], shared: bool) -> None:
     """Mark rows shared / not shared. Un-sharing a row also clears its settlement."""

@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
-from config import LLM_BASE_URL, LLM_MAX_TOKENS, LLM_MODEL, LLM_PARALLEL, LLM_TIMEOUT
+from config import AGENT_MAX_TOKENS, AGENT_TIMEOUT, LLM_BASE_URL, LLM_MAX_TOKENS, LLM_MODEL, LLM_PARALLEL, LLM_TIMEOUT
 
 
 def is_available() -> bool:
@@ -155,3 +155,23 @@ def categorize_many(items: list[tuple], categories: list[str], model: str | None
 
     with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
         return list(pool.map(one, items))
+
+
+class LLMError(RuntimeError):
+    """The LLM server was unreachable or answered with something unusable."""
+
+
+def chat(messages: list[dict], tools: list[dict] | None = None, model: str | None = None) -> dict:
+    """One chat-completions call at temperature 0 (the agent's call). Returns the assistant message dict
+    ({"role", "content", optional "tool_calls"}). Raises LLMError on any failure."""
+    body = {"model": model or LLM_MODEL, "messages": messages, "temperature": 0.0, "max_tokens": AGENT_MAX_TOKENS}
+    if tools:
+        body["tools"] = tools
+    try:
+        r = requests.post(f"{LLM_BASE_URL}/chat/completions", json=body, timeout=AGENT_TIMEOUT)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]
+    except requests.HTTPError as e:
+        raise LLMError(f"LLM server returned {e.response.status_code}: {e.response.text[:300]}") from e
+    except (requests.RequestException, KeyError, IndexError, ValueError) as e:
+        raise LLMError(f"Could not get an answer from the LLM at {LLM_BASE_URL}: {e}") from e

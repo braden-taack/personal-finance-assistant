@@ -21,6 +21,12 @@ LLM_TIMEOUT = float(os.environ.get("FT_LLM_TIMEOUT", "60"))
 # Reasoning models (e.g. Qwen3) spend tokens thinking before they answer; too low a cap returns no answer.
 LLM_MAX_TOKENS = int(os.environ.get("FT_LLM_MAX_TOKENS", "1024"))
 
+# Assistant (agent) page. Always temperature 0. Reasoning models need a generous token cap: they think, then call tools.
+AGENT_MAX_TOKENS = int(os.environ.get("FT_AGENT_MAX_TOKENS", "4096"))
+AGENT_MAX_STEPS = int(os.environ.get("FT_AGENT_MAX_STEPS", "10"))     # LLM calls allowed per question
+AGENT_TIMEOUT = float(os.environ.get("FT_AGENT_TIMEOUT", "180"))
+AGENT_MAX_ROWS = 50                                                    # transaction rows one tool call may return
+
 # Confidence cascade
 ML_THRESHOLD = float(os.environ.get("FT_ML_THRESHOLD", "0.90"))    # below -> ask LLM
 # Above 1.0 the LLM never auto-accepts: calibration on my data showed its stated confidence doesn't

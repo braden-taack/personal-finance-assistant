@@ -50,6 +50,28 @@ a copy is saved as `data/finance.pre-v<N>-backup.db`.
 - **Import CSV**, **Review queue**, **Transactions**, **Categories & Model** (categories, `is_savings`, bank settings,
   retraining).
 
+## Assistant
+The **Assistant** page is a chat agent that uses the same LM Studio model as the rest of the app, at temperature 0
+(`agent.py`, `agent_tools.py`, `llm.chat`). It has no data of its own; it works through tools:
+
+- **Read tools** compute every figure with pandas from the database: overview, transaction search, sum / avg / min /
+  max / median / count (optionally grouped by category, bank, month, year, merchant, ...), month-by-month trends
+  (mean per month, high/low, change, slope and direction), budget vs actual and Table 1, budgets, paychecks, shared
+  expenses and the review queue.
+- **Write tools** cover what the other pages do: edit or delete transactions (by id or filter), confirm review-queue
+  items, set or copy budgets, edit paycheck lines, add / rename / retire categories, retrain the classifier. They only
+  **propose** an action. It is validated against real data (unknown categories, bad ids, empty filters are refused),
+  shown under *Pending actions* with a before/after preview, and applied only when you click **Approve**.
+- **Grounding**: the prompt forbids estimating or doing math; before an answer is shown, every number and date in it is
+  checked against the tool results from the conversation. Unverifiable figures send the model back for real data, and
+  if it still can't back them up the answer is shown with a warning. Each answer has a *Data used* expander listing
+  the exact tool calls and results. The check is a heuristic: it catches invented figures, not a wrong reading of a
+  real one, and bare integers up to 20 are treated as counts.
+
+Not covered: importing CSV files (use the Import page). Tool calling needs a model LM Studio can call tools with.
+Settings: `FT_AGENT_MAX_TOKENS` (4096), `FT_AGENT_MAX_STEPS` (10), `FT_AGENT_TIMEOUT` (180).
+Tests: `python tests/agent_test.py` (scripted fake LLM, throwaway database, no LM Studio needed).
+
 ## Banks and CSV import
 Banks are FIDELITY, C1, AMEX and DISCOVER, stored in `banks` with a saved column mapping and sign convention each.
 Only date, description and amount are required. Amount can be one signed column, or separate **Debit** and

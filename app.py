@@ -1,6 +1,7 @@
 """Streamlit dashboard. Run with:  streamlit run app.py"""
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import date
 
@@ -9,6 +10,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+import agent as agent_mod
+import agent_tools
 import classifier
 import db
 import importer
@@ -23,7 +26,7 @@ db.init_db()
 PAGE = st.sidebar.radio(
     "Go to",
     ["Dashboard", "Budgets", "Paychecks", "Shared expenses", "Import CSV", "Review queue", "Transactions",
-     "Categories & Model"],
+     "Categories & Model", "Assistant"],
 )
 q = len(db.fetch_review_queue())
 if q:
@@ -784,6 +787,85 @@ def page_transactions():
             st.rerun()
 
 
+# ============================================================ Assistant
+def page_assistant():
+    st.title("Assistant")
+    st.caption("Ask about your money or ask for changes. It answers only from your database (temperature 0), shows the "
+               "tool calls behind every answer, and never changes anything until you approve it.")
+    model = llm.resolve_model(pipeline.llm_model())
+    if not model:
+        st.error(f"The LLM server isn't reachable at {LLM_BASE_URL}. Start LM Studio's server and reload.")
+        return
+    ag = st.session_state.get("assistant")
+    if ag is None:
+        ag = st.session_state["assistant"] = agent_mod.Agent(model)
+        st.session_state["assistant_log"] = []
+    ag.model = model
+    log = st.session_state["assistant_log"]
+    st.sidebar.caption(f"Assistant model: {model} · temperature 0")
+    if st.sidebar.button("New conversation"):
+        del st.session_state["assistant"], st.session_state["assistant_log"]
+        st.rerun()
+
+    def show_calls(calls):
+        with st.expander(f"Data used ({len(calls)} tool call(s))"):
+            for c in calls:
+                st.markdown(f"**{c.name}** `{json.dumps(c.args)}`")
+                st.json(c.result, expanded=False)
+
+    def show_message(m):
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+            if m.get("staged"):
+                st.info("Proposed only. Nothing has changed until you approve it under Pending actions below.")
+            if m.get("ungrounded"):
+                st.warning("Couldn't verify these figures against the database: " + ", ".join(m["ungrounded"]))
+            if m.get("calls"):
+                show_calls(m["calls"])
+
+    if not log:
+        st.info("Try: *How much did I spend on groceries each month this year?* · *What's my highest transaction "
+                "this month?* · *Am I over budget anywhere this month?* · *Go through my review queue.*")
+    for m in log:
+        show_message(m)
+
+    question = st.chat_input("Ask about your finances…")
+    if question:
+        log.append({"role": "user", "content": question})
+        with st.chat_message("user"):
+            st.markdown(question)
+        with st.chat_message("assistant"), st.spinner("Looking at your data…"):
+            turn = ag.ask(question)
+        log.append({"role": "assistant", "content": turn.answer, "calls": turn.calls, "ungrounded": turn.ungrounded,
+                    "staged": turn.staged})
+        st.rerun()
+
+    pending = ag.ctx.open_actions()
+    if pending:
+        st.divider()
+        st.subheader(f"Pending actions ({len(pending)})")
+        st.caption("Proposed by the assistant, checked against your data, not applied yet.")
+        for a in pending:
+            with st.container(border=True):
+                st.markdown(f"**{a['summary']}**")
+                if a["preview"]:
+                    st.dataframe(pd.DataFrame(a["preview"]), hide_index=True, width="stretch")
+                    if a["rows_affected"] and a["rows_affected"] > len(a["preview"]):
+                        st.caption(f"Showing {len(a['preview'])} of {a['rows_affected']} rows.")
+                ok_col, no_col, _ = st.columns([1, 1, 4])
+                if ok_col.button("Approve", key=f"ap_{a['id']}", type="primary"):
+                    ok, msg = agent_tools.apply_action(a)
+                    ag.note(f"Action {a['id']} ({a['summary']}) was approved and "
+                            + (f"applied. {msg}" if ok else f"FAILED: {msg}"))
+                    log.append({"role": "assistant", "content": ("✅ " if ok else "❌ ") + f"{a['summary']}: {msg}"})
+                    st.rerun()
+                if no_col.button("Reject", key=f"rj_{a['id']}"):
+                    agent_tools.reject_action(a)
+                    ag.note(f"Action {a['id']} ({a['summary']}) was rejected by the user; nothing changed.")
+                    log.append({"role": "assistant", "content": f"Rejected: {a['summary']}"})
+                    st.rerun()
+
+
 # ============================================================ Categories & Model
 def page_model():
     st.title("Categories & Model")
@@ -895,4 +977,5 @@ def page_model():
     "Review queue": page_review,
     "Transactions": page_transactions,
     "Categories & Model": page_model,
+    "Assistant": page_assistant,
 }[PAGE]()

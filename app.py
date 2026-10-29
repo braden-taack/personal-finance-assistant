@@ -834,19 +834,28 @@ def page_transactions():
         b_bank = b2.selectbox("Bank", banks, index=None, placeholder="(no change)", key=f"bk_bank_{ver}")
         b_kind = b3.selectbox("Kind", ["expense", "income"], index=None, placeholder="(no change)", key=f"bk_kind_{ver}")
         b_shared = b4.selectbox("Shared", ["(no change)", "Shared", "Not shared"], key=f"bk_sh_{ver}")
-        b5, b6, b7 = st.columns(3)
+        b5, b6, b7, b8 = st.columns(4)
         b_date = b5.date_input("Date", value=None, key=f"bk_date_{ver}")
         b_desc = b6.text_input("Description", key=f"bk_desc_{ver}", placeholder="(no change)")
         b_settled = b7.selectbox("Settled", ["(no change)", "Settled", "Not settled"], key=f"bk_se_{ver}")
+        b_sh_amt = b8.number_input("Shared amount", min_value=0.0, value=None, step=1.0, format="%.2f",
+                                   placeholder="(no change)", key=f"bk_shamt_{ver}",
+                                   help="Dollar amount split with your roommate on each selected row. "
+                                        "Also marks them shared.")
         bulk = {k: v for k, v in {
             "category": b_cat, "bank": b_bank, "kind": b_kind,
             "date": b_date.isoformat() if b_date else None,
             "description": b_desc.strip() or None,
-            "shared": {"Shared": True, "Not shared": False}.get(b_shared),
+            "shared": True if b_sh_amt is not None else {"Shared": True, "Not shared": False}.get(b_shared),
+            "shared_amount": b_sh_amt,
             "shared_settled": {"Settled": True, "Not settled": False}.get(b_settled),
         }.items() if v is not None}
         a, d = st.columns([1, 1])
-        if a.button(f"Apply to {len(sel)} row(s)", type="primary", disabled=not sel or not bulk):
+        too_big = [t for t in sel if b_sh_amt is not None and b_sh_amt > float(out.at[t, "Amount"]) + 0.004]
+        if too_big:
+            st.error(f"Shared amount exceeds the transaction amount on {len(too_big)} selected row(s) "
+                     f"(e.g. id {too_big[0]}).")
+        if a.button(f"Apply to {len(sel)} row(s)", type="primary", disabled=not sel or not bulk or bool(too_big)):
             db.update_transactions(sel, bulk)
             st.session_state["tx_ver"] = ver + 1
             st.rerun()

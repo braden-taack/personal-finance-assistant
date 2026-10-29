@@ -35,7 +35,7 @@ assert sqlite3.connect(old).execute("PRAGMA user_version").fetchone()[0] == 0
 db.DB_PATH = old
 db.init_db()
 db.init_db()  # second run must be a no-op
-assert db.schema_version() == db.SCHEMA_VERSION == 3
+assert db.schema_version() == db.SCHEMA_VERSION == 4
 tx_old = db.fetch_transactions().set_index("description")
 assert len(tx_old) == 3, "migration lost rows"
 assert tx_old.loc["KROGER 0932", "bank"] == "AMEX" and pd.isna(tx_old.loc["CHIPOTLE 2231", "bank"])

@@ -477,7 +477,12 @@ def manual_entry_tab():
         bank = c4.selectbox("Bank", banks, index=None, placeholder="(none)")
         cats = db.get_categories(kind=None)
         cat = c5.selectbox("Category", cats, index=None, placeholder="(auto-categorize)")
-        shared = c6.checkbox("Shared with roommate")
+        shared = c6.checkbox("Shared")
+        s1, s2 = st.columns(2)
+        share_mode = s1.radio("Shared portion", ["Whole expense", "Percent", "Amount"], horizontal=True,
+                              help="Only used when Shared is ticked: how much of the expense is split.")
+        share_val = s2.number_input("Percent (0-100) or amount shared", min_value=0.0, step=1.0, format="%.2f",
+                                    help="Ignored for 'Whole expense'.")
         submitted = st.form_submit_button("Add transaction", type="primary")
     if not submitted:
         return
@@ -487,8 +492,16 @@ def manual_entry_tab():
     if amount <= 0:
         st.error("Amount must be greater than zero.")
         return
+    shared_amount = None
+    if shared and share_mode != "Whole expense":
+        shared_amount = amount * share_val / 100 if share_mode == "Percent" else share_val
+        if share_mode == "Percent" and share_val > 100 or shared_amount > amount:
+            st.error("The shared portion can't be more than the whole expense.")
+            return
+        shared_amount = round(shared_amount, 2)
     row = pd.DataFrame([{"date": d.isoformat(), "bank": bank, "description": desc.strip(), "amount": amount,
-                         "kind": kind, "account": "", "category": cat, "shared": int(shared)}])
+                         "kind": kind, "account": "", "category": cat, "shared": int(shared),
+                         "shared_amount": shared_amount}])
     done = pipeline.categorize_frame(row, use_llm=bool(cat is None and st.session_state.get("imp_llm", False)))
     if cat:
         done["cat_source"], done["cat_confidence"], done["needs_review"] = "manual", 1.0, 0
@@ -747,6 +760,7 @@ def page_transactions():
         "Amount": tx["amount"].values,
         "Kind": tx["kind"].values,
         "Shared": tx["shared"].astype(bool).values,
+        "Shared amount": tx["shared_amount"].values,
         "Settled": tx["shared_settled"].astype(bool).values,
         "My share": tx["effective"].values,
         "Source": tx["cat_source"].values,
@@ -763,12 +777,17 @@ def page_transactions():
             "Category": st.column_config.SelectboxColumn(options=cat_opts),
             "Amount": st.column_config.NumberColumn(format="dollar", required=True),
             "Kind": st.column_config.SelectboxColumn(options=["expense", "income"], required=True),
+            "Shared amount": st.column_config.NumberColumn(
+                format="dollar", min_value=0.0,
+                help="Optional: the part of the amount split with your roommate. Blank = the whole amount. "
+                     "Entering one marks the row shared."),
             "My share": st.column_config.NumberColumn(format="dollar"),
             "Confidence": st.column_config.NumberColumn(format="percent"),
         })
 
     fields = {"Date": "date", "Bank": "bank", "Description": "description", "Category": "category",
-              "Amount": "amount", "Kind": "kind", "Shared": "shared", "Settled": "shared_settled"}
+              "Amount": "amount", "Kind": "kind", "Shared": "shared", "Shared amount": "shared_amount",
+              "Settled": "shared_settled"}
 
     def changed_cells() -> dict[int, dict]:
         edits: dict[int, dict] = {}
@@ -780,6 +799,9 @@ def page_transactions():
                 if field == "date" and v is not None:
                     v = pd.Timestamp(v).date().isoformat()
                 edits.setdefault(int(tid), {})[field] = v
+        for tid, e in edits.items():   # a shared amount implies the row is shared
+            if e.get("shared_amount") is not None and "shared" not in e:
+                e["shared"] = True
         return edits
 
     edits = changed_cells()
@@ -788,8 +810,12 @@ def page_transactions():
         bad = [t for t, e in edits.items()
                if ("description" in e and not str(e["description"] or "").strip())
                or any(k in e and e[k] is None for k in ("date", "amount", "kind"))]
+        over = [t for t, e in edits.items()
+                if e.get("shared_amount") is not None and e["shared_amount"] > float(out.at[t, "Amount"]) + 0.004]
         if bad:
             st.error(f"Date, description, amount and kind can't be empty (transaction id {bad[0]}).")
+        elif over:
+            st.error(f"Shared amount can't exceed the transaction amount (transaction id {over[0]}).")
         else:
             for tid, e in edits.items():
                 if "description" in e:

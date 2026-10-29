@@ -136,7 +136,12 @@ def _migrate_v3(c: sqlite3.Connection) -> None:
     c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
 
 
-MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3]   # index + 1 == version reached after running it
+def _migrate_v4(c: sqlite3.Connection) -> None:
+    """Partly shared transactions: shared_amount is the portion split with the roommate (NULL = the whole amount)."""
+    _add_column(c, "transactions", "shared_amount", "REAL")
+
+
+MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4]   # index + 1 == version reached after running it
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -281,13 +286,15 @@ def insert_transactions(rows: Iterable[dict], batch: str) -> int:
             c.execute(
                 """INSERT INTO transactions
                    (date, bank, description, amount, kind, account, category, cat_source,
-                    cat_confidence, needs_review, import_batch, shared, shared_settled, shared_settled_date)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    cat_confidence, needs_review, import_batch, shared, shared_settled, shared_settled_date,
+                    shared_amount)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     r["date"], r.get("bank"), r["description"], float(r["amount"]), r.get("kind", "expense"),
                     r.get("account", ""), r.get("category"), r.get("cat_source"),
                     r.get("cat_confidence"), int(r.get("needs_review", 0)), batch,
                     int(r.get("shared", 0)), int(r.get("shared_settled", 0)), r.get("shared_settled_date"),
+                    r.get("shared_amount"),
                 ),
             )
             n += 1
@@ -318,13 +325,23 @@ def effective_amount(df: pd.DataFrame) -> pd.Series:
     """
     if df.empty:
         return pd.Series(dtype=float, index=df.index)
-    shared = df["shared"].fillna(0).astype(int) == 1 if "shared" in df else False
-    return df["amount"].astype(float) * np.where(shared, SHARED_SPLIT, 1.0)
+    amount = df["amount"].astype(float)
+    return amount - shared_portion(df) * (1 - SHARED_SPLIT)
+
+
+def shared_portion(df: pd.DataFrame) -> pd.Series:
+    """The part of each row that is split with the roommate: 0 if not shared, else shared_amount (default: all)."""
+    amount = df["amount"].astype(float)
+    if "shared" not in df:
+        return amount * 0.0
+    shared = df["shared"].fillna(0).astype(int) == 1
+    part = df["shared_amount"].astype(float) if "shared_amount" in df else pd.Series(np.nan, index=df.index)
+    return pd.Series(np.where(shared, part.fillna(amount), 0.0), index=df.index)
 
 
 def roommate_amount(df: pd.DataFrame) -> pd.Series:
     """What the roommate owes per row: the non-mine part of shared rows, 0 otherwise."""
-    return df["amount"].astype(float) - effective_amount(df)
+    return shared_portion(df) * (1 - SHARED_SPLIT)
 
 
 def month_bounds(month: str) -> tuple[str, str]:
@@ -388,7 +405,8 @@ def delete_transaction(tx_id: int) -> None:
         c.execute("DELETE FROM transactions WHERE id=?", (tx_id,))
 
 
-EDITABLE_FIELDS = ("date", "bank", "description", "amount", "kind", "category", "shared", "shared_settled")
+EDITABLE_FIELDS = ("date", "bank", "description", "amount", "kind", "category", "shared", "shared_amount",
+                   "shared_settled")
 
 
 def update_transactions(ids: Iterable[int], changes: dict) -> int:
@@ -404,6 +422,8 @@ def update_transactions(ids: Iterable[int], changes: dict) -> int:
     plain = {k: v for k, v in changes.items() if k not in ("category", "shared", "shared_settled")}
     if "amount" in plain:
         plain["amount"] = float(plain["amount"])
+    if plain.get("shared_amount") is not None:
+        plain["shared_amount"] = float(plain["shared_amount"])
     sets, vals = [f"{k}=?" for k in plain], list(plain.values())
     if "category" in changes:
         cat = changes["category"] or None
@@ -417,7 +437,7 @@ def update_transactions(ids: Iterable[int], changes: dict) -> int:
                 if changes["shared"]:
                     c.execute("UPDATE transactions SET shared=1 WHERE id=?", (i,))
                 else:
-                    c.execute("UPDATE transactions SET shared=0, shared_settled=0, shared_settled_date=NULL WHERE id=?", (i,))
+                    c.execute("UPDATE transactions SET shared=0, shared_amount=NULL, shared_settled=0, shared_settled_date=NULL WHERE id=?", (i,))
             if "shared_settled" in changes:
                 if changes["shared_settled"]:
                     c.execute("UPDATE transactions SET shared_settled=1, shared_settled_date=COALESCE(shared_settled_date, ?) "
@@ -442,7 +462,7 @@ def set_shared(ids: Iterable[int], shared: bool) -> None:
         if shared:
             c.executemany("UPDATE transactions SET shared=1 WHERE id=?", [(i,) for i in ids])
         else:
-            c.executemany("UPDATE transactions SET shared=0, shared_settled=0, shared_settled_date=NULL WHERE id=?",
+            c.executemany("UPDATE transactions SET shared=0, shared_amount=NULL, shared_settled=0, shared_settled_date=NULL WHERE id=?",
                           [(i,) for i in ids])
 
 

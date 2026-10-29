@@ -106,6 +106,7 @@ def shared_rows(months: list[str] | None = None) -> pd.DataFrame:
     tx = tx[tx["shared"] == 1].copy()
     tx["category"] = tx["category"].fillna("Uncategorized")
     tx["roommate"] = db.roommate_amount(tx)
+    tx["shared_total"] = db.shared_portion(tx)
     return tx
 
 
@@ -119,7 +120,7 @@ def roommate_by_category(month: str) -> pd.DataFrame:
         rows["settled_amt"] = rows["roommate"].where(rows["shared_settled"] == 1, 0.0)
         g = rows.groupby("category")
         df = pd.DataFrame({
-            "Shared total": g["amount"].sum(),
+            "Shared total": g["shared_total"].sum(),
             "Roommate owes": g["roommate"].sum(),
             "Settled": g["settled_amt"].sum(),
         })

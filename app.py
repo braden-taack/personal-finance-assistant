@@ -124,10 +124,10 @@ def page_dashboard():
     c1, c2, c3 = st.columns([1, 1, 2])
     mode = c1.radio("View", ["Month", "Year"], horizontal=True)
     if mode == "Month":
-        month = c2.selectbox("Month", opts)
+        month = c2.selectbox("Month", opts, index=opts.index(THIS_MONTH))
         months, label, year = [month], month, int(month[:4])
     else:
-        year = c2.selectbox("Year", years)
+        year = c2.selectbox("Year", years, index=years.index(int(THIS_MONTH[:4])))
         months, label = reports.months_of_year(year), str(year)
 
     tx = reports.expenses_for(months)
@@ -327,7 +327,8 @@ def page_shared():
     st.title("Shared expenses")
     st.caption(f"Mark transactions you split with your roommate. Shared rows count at {SHARED_SPLIT:.0%} in your "
                f"budget; your roommate owes the other {1 - SHARED_SPLIT:.0%}. Nothing is marked automatically.")
-    month = st.selectbox("Month", month_options())
+    opts = month_options()
+    month = st.selectbox("Month", opts, index=opts.index(THIS_MONTH))
 
     tx = reports.expenses_for([month])
     st.subheader(f"Transactions — {month}")
@@ -441,7 +442,7 @@ def page_shared():
             st.caption("Use the copy icon in the box's corner, then paste into Venmo or a text.")
     else:
         years = sorted({int(m[:4]) for m in month_options()}, reverse=True)
-        year = st.selectbox("Year", years, key="rm_year")
+        year = st.selectbox("Year", years, index=years.index(int(THIS_MONTH[:4])), key="rm_year")
         st.metric("Total still owed by roommate across all months", money(total_owed))
         by_month = reports.roommate_by_month(year)
         st.dataframe(by_month.style.format(fmt), width="stretch")
@@ -455,6 +456,49 @@ def page_shared():
 # ============================================================ Import
 def page_import():
     st.title("Import CSV")
+    tab_csv, tab_manual = st.tabs(["Upload CSV", "Manual entry"])
+    with tab_csv:
+        import_csv_tab()
+    with tab_manual:
+        manual_entry_tab()
+
+
+def manual_entry_tab():
+    st.caption("Add a single transaction by hand.")
+    banks = db.get_banks()
+    with st.form("manual_tx", clear_on_submit=True):
+        c1, c2, c3 = st.columns(3)
+        d = c1.date_input("Date", value=date.today())
+        amount = c2.number_input("Amount", min_value=0.0, step=1.0, format="%.2f",
+                                 help="Enter a positive number; use Kind to mark income.")
+        kind = c3.selectbox("Kind", ["expense", "income"])
+        desc = st.text_input("Description")
+        c4, c5, c6 = st.columns(3)
+        bank = c4.selectbox("Bank", banks, index=None, placeholder="(none)")
+        cats = db.get_categories(kind=None)
+        cat = c5.selectbox("Category", cats, index=None, placeholder="(auto-categorize)")
+        shared = c6.checkbox("Shared with roommate")
+        submitted = st.form_submit_button("Add transaction", type="primary")
+    if not submitted:
+        return
+    if not desc.strip():
+        st.error("Description is required.")
+        return
+    if amount <= 0:
+        st.error("Amount must be greater than zero.")
+        return
+    row = pd.DataFrame([{"date": d.isoformat(), "bank": bank, "description": desc.strip(), "amount": amount,
+                         "kind": kind, "account": "", "category": cat, "shared": int(shared)}])
+    done = pipeline.categorize_frame(row, use_llm=bool(cat is None and st.session_state.get("imp_llm", False)))
+    if cat:
+        done["cat_source"], done["cat_confidence"], done["needs_review"] = "manual", 1.0, 0
+    db.insert_transactions(done.to_dict("records"), f"manual-{date.today().isoformat()}-{uuid.uuid4().hex[:6]}")
+    msg = f"Added {desc.strip()} ({money(amount)}) on {d.isoformat()}"
+    got = done.at[0, "category"]
+    st.success(msg + (f" as {got}." if isinstance(got, str) and got else ". It needs review."))
+
+
+def import_csv_tab():
     st.caption("Required columns: date, description and amount (or separate Debit/Credit). Duplicates are checked "
                "against your database and within the file before anything is saved.")
     f = st.file_uploader("CSV file (bank export, or the Transactions table exported from Numbers)", type=["csv"])

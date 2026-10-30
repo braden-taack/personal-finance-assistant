@@ -208,7 +208,7 @@ def shared_merchant_hints() -> set[str]:
 def sankey(year: int) -> dict | None:
     """Gross -> taxes / other deductions / 401k / take-home; take-home -> categories (+ leftover).
 
-    Returns {labels, source, target, value} or None when there is no paycheck or spending data.
+    Returns {labels, source, target, value, gross} or None when there is no paycheck or spending data.
     """
     months = months_of_year(year)
     pay = paycheck_summary(months)
@@ -247,4 +247,4 @@ def sankey(year: int) -> dict | None:
         link(take, cat, float(v))
     if shortfall < -0.005:
         link(take, "Leftover", -shortfall)
-    return {"labels": labels, "source": src, "target": tgt, "value": val}
+    return {"labels": labels, "source": src, "target": tgt, "value": val, "gross": pay["gross"]}

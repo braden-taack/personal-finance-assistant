@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from datetime import date
 
@@ -115,6 +116,44 @@ def show_paycheck(lines: pd.DataFrame, title: str) -> None:
     st.caption(f"{EMPLOYER_CATEGORY} lines are not part of take-home; they only count toward 401k Saved.")
 
 
+SANKEY_FIXED = {   # flow stages keep one colour each; spending categories cycle SANKEY_CYCLE
+    "Gross income": "#3B6FB6", "Take-home": "#1F9E89", "Taxes": "#D1495B", "Other deductions": "#E08E2B",
+    "401k": "#6A9F3A", "Employer 401k match": "#8DB863", "Leftover": "#2FB59B",
+    "Shortfall (spent more than take-home)": "#B23A48",
+}
+SANKEY_CYCLE = ["#7B6DD8", "#C0589E", "#4C9BE8", "#D9A441", "#4DAA7F", "#E0735A", "#8A7F72", "#5FB0C9"]
+
+
+def compact_money(v: float) -> str:
+    if v < 0:
+        return "-" + compact_money(-v)
+    for limit, suffix in ((1e6, "M"), (1e3, "K")):
+        if abs(v) >= limit:
+            return f"${v / limit:.1f}{suffix}".replace(".0" + suffix, suffix)
+    return f"${v:,.0f}"
+
+
+def sankey_figure(sk: dict) -> go.Figure:
+    """Sankey with `Name · $12.3K · 18%` labels (% of gross income), per-stage colours and larger text."""
+    labels, src, tgt, val = sk["labels"], sk["source"], sk["target"], sk["value"]
+    flow = [max(sum(v for t, v in zip(tgt, val) if t == i), sum(v for s, v in zip(src, val) if s == i))
+            for i in range(len(labels))]
+    gross = sk["gross"] or max(flow, default=0)
+    text = [f"{n} · {compact_money(f)}" + (f" · {'<1%' if 0 < f / gross < 0.005 else format(f / gross, '.0%')}" if gross > 0 else "") for n, f in zip(labels, flow)]
+    cycle = iter(SANKEY_CYCLE * (len(labels) // len(SANKEY_CYCLE) + 1))
+    colors = [SANKEY_FIXED.get(n) or next(cycle) for n in labels]
+    link_colors = [f"rgba({int(colors[s][1:3], 16)},{int(colors[s][3:5], 16)},{int(colors[s][5:7], 16)},0.35)" for s in src]
+    fig = go.Figure(go.Sankey(
+        arrangement="snap", textfont=dict(size=15),
+        node=dict(label=text, color=colors, pad=22, thickness=22, line=dict(color="rgba(0,0,0,0)", width=0),
+                  hovertemplate="%{label}<extra></extra>"),
+        link=dict(source=src, target=tgt, value=val, color=link_colors,
+                  hovertemplate="%{source.label} → %{target.label}<br>$%{value:,.2f}<extra></extra>"),
+    ))
+    fig.update_layout(height=640, margin=dict(t=20, l=10, r=10, b=10))
+    return fig
+
+
 # ============================================================ Dashboard
 def page_dashboard():
     st.title("Dashboard")
@@ -215,14 +254,10 @@ def page_dashboard():
     if not sk:
         st.caption("No paycheck or spending data for this year.")
     else:
-        fig = go.Figure(go.Sankey(
-            node=dict(label=sk["labels"], pad=18, thickness=18),
-            link=dict(source=sk["source"], target=sk["target"], value=sk["value"]),
-        ))
-        fig.update_layout(height=560, margin=dict(t=20))
+        fig = sankey_figure(sk)
         st.plotly_chart(fig, width="stretch")
         st.caption("Gross pay → taxes, other deductions, 401k and take-home; take-home → categories (my share) "
-                   "and whatever is left over.")
+                   "and whatever is left over. Percentages are of gross income.")
 
 
 # ============================================================ Budgets
@@ -475,8 +510,9 @@ def manual_entry_tab():
     with st.form("manual_tx", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
         d = c1.date_input("Date", value=date.today())
-        amount = c2.number_input("Amount", min_value=0.0, step=1.0, format="%.2f",
-                                 help="Enter a positive number; use Kind to mark income.")
+        amount = c2.number_input("Amount", step=1.0, format="%.2f",
+                                 help="Positive for spending. Negative for money back (Venmo, reimbursement, refund): "
+                                      "it reduces that category's actual spending.")
         kind = c3.selectbox("Kind", ["expense", "income"])
         desc = st.text_input("Description")
         c4, c5, c6 = st.columns(3)
@@ -486,7 +522,7 @@ def manual_entry_tab():
         shared = c6.checkbox("Shared")
         s1, s2 = st.columns(2)
         share_mode = s1.radio("Shared portion", ["Whole expense", "Percent", "Amount"], horizontal=True,
-                              help="Only used when Shared is ticked: how much of the expense is split.")
+                              help="Only used when Shared is ticked: how much of the amount is split.")
         share_val = s2.number_input("Percent (0-100) or amount shared", min_value=0.0, step=1.0, format="%.2f",
                                     help="Ignored for 'Whole expense'.")
         submitted = st.form_submit_button("Add transaction", type="primary")
@@ -495,14 +531,17 @@ def manual_entry_tab():
     if not desc.strip():
         st.error("Description is required.")
         return
-    if amount <= 0:
-        st.error("Amount must be greater than zero.")
+    if amount == 0:
+        st.error("Amount can't be zero.")
         return
     shared_amount = None
     if shared and share_mode != "Whole expense":
-        shared_amount = amount * share_val / 100 if share_mode == "Percent" else share_val
-        if share_mode == "Percent" and share_val > 100 or shared_amount > amount:
-            st.error("The shared portion can't be more than the whole expense.")
+        if share_mode == "Percent":
+            shared_amount = amount * share_val / 100
+        else:   # entered as a size; it takes the sign of the amount (a negative amount shares a negative portion)
+            shared_amount = math.copysign(share_val, amount)
+        if share_mode == "Percent" and share_val > 100 or abs(shared_amount) > abs(amount):
+            st.error("The shared portion can't be more than the whole amount.")
             return
         shared_amount = round(shared_amount, 2)
     row = pd.DataFrame([{"date": d.isoformat(), "bank": bank, "description": desc.strip(), "amount": amount,
@@ -784,7 +823,7 @@ def page_transactions():
             "Amount": st.column_config.NumberColumn(format="dollar", required=True),
             "Kind": st.column_config.SelectboxColumn(options=["expense", "income"], required=True),
             "Shared amount": st.column_config.NumberColumn(
-                format="dollar", min_value=0.0,
+                format="dollar",
                 help="Optional: the part of the amount split with your roommate. Blank = the whole amount. "
                      "Entering one marks the row shared."),
             "My share": st.column_config.NumberColumn(format="dollar"),
@@ -817,7 +856,7 @@ def page_transactions():
                if ("description" in e and not str(e["description"] or "").strip())
                or any(k in e and e[k] is None for k in ("date", "amount", "kind"))]
         over = [t for t, e in edits.items()
-                if e.get("shared_amount") is not None and e["shared_amount"] > float(out.at[t, "Amount"]) + 0.004]
+                if e.get("shared_amount") is not None and abs(e["shared_amount"]) > abs(float(out.at[t, "Amount"])) + 0.004]
         if bad:
             st.error(f"Date, description, amount and kind can't be empty (transaction id {bad[0]}).")
         elif over:

@@ -452,7 +452,7 @@ def get_budget(ctx: Context, month: str | None = None) -> dict:
             "total": round(float(eff["amount"].sum()), 2)}
 
 
-@tool("The two paychecks for a month (carried forward from the latest earlier month if none saved) with gross, "
+@tool("The paychecks for a month (mid, end and the occasional commission check) (carried forward from the latest earlier month if none saved) with gross, "
       "taxes, deductions, 401k, employer match and take-home per paycheck and for the month.",
       {"month": {"type": "string", "description": "yyyy-mm (default current month)"}})
 def get_paychecks(ctx: Context, month: str | None = None) -> dict:
@@ -659,12 +659,12 @@ def copy_budget_forward(ctx: Context, from_month: str, to_month: str) -> dict:
 
 
 @tool("Propose changing one paycheck line amount (the line must already exist, see get_paychecks). Only PROPOSED.",
-      {"month": {"type": "string"}, "period": {"type": "string", "enum": ["mid", "end"]},
+      {"month": {"type": "string"}, "period": {"type": "string", "enum": ["mid", "end", "commission"]},
        "category": {"type": "string"}, "subcategory": {"type": "string"}, "amount": {"type": "number"}},
       required=("month", "period", "category", "subcategory", "amount"), write=True)
 def set_paycheck_line(ctx: Context, month: str, period: str, category: str, subcategory: str, amount) -> dict:
     month = _month(month)
-    period = _pick(period, ["mid", "end"], "period")
+    period = _pick(period, ["mid", "end", "commission"], "period")
     amount = round(_num(amount, "amount"), 2)
     if amount < 0:
         raise ToolError("amount can't be negative.")

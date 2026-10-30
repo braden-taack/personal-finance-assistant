@@ -35,7 +35,7 @@ assert sqlite3.connect(old).execute("PRAGMA user_version").fetchone()[0] == 0
 db.DB_PATH = old
 db.init_db()
 db.init_db()  # second run must be a no-op
-assert db.schema_version() == db.SCHEMA_VERSION == 4
+assert db.schema_version() == db.SCHEMA_VERSION == 6
 tx_old = db.fetch_transactions().set_index("description")
 assert len(tx_old) == 3, "migration lost rows"
 assert tx_old.loc["KROGER 0932", "bank"] == "AMEX" and pd.isna(tx_old.loc["CHIPOTLE 2231", "bank"])
@@ -63,6 +63,9 @@ print(t1)
 assert close(t1.loc["Budgeted", "Net Leftover"], -628.71)        # 4670.42 - 5299.13
 assert close(t1.loc["Budgeted", "Liquid Saved"], 1000)
 assert close(t1.loc["Budgeted", "401k Saved"], 3875.92)          # 4 x 968.98 (employer match assumption)
+com = pay[pay["period"] == "commission"]
+assert len(com) == len(pay[pay["period"] == "mid"]) and (com["amount"] == 0).all()
+assert close(db.paycheck_totals(com)["take_home"], 0)
 print("seeds + paychecks + Net Leftover (budgeted): OK")
 
 # Carry-forward: a later month with nothing saved uses this month's budget and paychecks.
@@ -165,7 +168,13 @@ print("Numbers export: OK")
 # ---------------------------------------------------------------- 7. Net Leftover (actual) mirrors the sheet
 M = "2030-01"
 db.copy_budget_forward(THIS_MONTH, M)
+_src = db.fetch_paychecks(THIS_MONTH)
+_src.loc[(_src["period"] == "commission") & (_src["subcategory"] == "Commission"), "amount"] = 5000.0
+db.save_paychecks(THIS_MONTH, _src)
 db.copy_paychecks_forward(THIS_MONTH, M)
+_dst = db.fetch_paychecks(M)
+assert (_dst[_dst["period"] == "commission"]["amount"] == 0).all() and close(db.paycheck_totals(_dst[_dst["period"] == "mid"])["take_home"], 2335.21)
+db.save_paychecks(THIS_MONTH, _src.assign(amount=_src["amount"].where(_src["period"] != "commission", 0.0)))
 sheet_actuals = {"Rent": 1675, "Investing": 1000, "Savings": 500}  # 3175.00 in all
 db.insert_transactions([dict(date=f"{M}-05", bank="FIDELITY", description=f"{c} payment", amount=a,
                              category=c, cat_source="manual") for c, a in sheet_actuals.items()], "sheet")

@@ -81,16 +81,18 @@ DEFAULT_BUDGET = {
     "Superlatives": 200, "Laundry": 20, "Investing": 1000,
 }
 
-# Paycheck lines (same for 'mid' and 'end'). "Income" lines add to take-home; every other
+# Paycheck lines (same for every period; the 'commission' check starts at 0 everywhere). "Income" lines add to take-home; every other
 # category except EMPLOYER_CATEGORY is a deduction. Take-home = 4614.17 - 2278.96 = 2335.21.
-PAYCHECK_PERIODS = ["mid", "end"]
+PAYCHECK_PERIODS = ["mid", "end", "commission"]   # "commission" is an occasional extra check, all lines 0 by default
 INCOME_CATEGORY = "Income"
+COMMISSION_SUBCATEGORY = "Commission"   # an Income line: taxed like salary, entered per paycheck (0 when none)
 EMPLOYER_CATEGORY = "Employer"          # not part of take-home; only feeds "401k Saved"
 RETIREMENT_SUBCATEGORY = "401K"
 EMPLOYER_MATCH_SUBCATEGORY = "401K Match"
 TAX_CATEGORIES = ["FED Taxes", "State Taxes", "Local"]
 DEFAULT_PAYCHECK = [
     ("Income", "Salary", 4614.17),
+    ("Income", COMMISSION_SUBCATEGORY, 0.0),
     ("FED Taxes", "Withholding", 468.37),
     ("FED Taxes", "Social Security", 243.46),
     ("FED Taxes", "Medicare", 56.94),

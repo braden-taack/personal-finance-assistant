@@ -62,7 +62,7 @@ def sidebar_llm() -> None:
 sidebar_llm()
 
 THIS_MONTH = date.today().strftime("%Y-%m")
-PERIOD_LABEL = {"mid": "Mid Month Paycheck", "end": "End of Month Paycheck"}
+PERIOD_LABEL = {"mid": "Mid Month Paycheck", "end": "End of Month Paycheck", "commission": "Commission Paycheck"}
 def money(x: float) -> str:
     return f"-${-x:,.2f}" if x < -0.004 else f"${abs(x):,.2f}"
 
@@ -135,11 +135,12 @@ def page_dashboard():
     t1 = reports.table1(months, summary)
     pay = reports.paycheck_summary(months)
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Take-home pay", money(pay["take_home"]))
-    m2.metric("Spent (my share)", money(summary.loc[reports.TOTAL, "Actual"]))
-    m3.metric("Net Leftover", money(t1.loc["Actual", "Net Leftover"]))
-    m4.metric("Transactions", len(tx))
+    m2.metric("Commission (gross)", money(pay["commission"]))
+    m3.metric("Spent (my share)", money(summary.loc[reports.TOTAL, "Actual"]))
+    m4.metric("Net Leftover", money(t1.loc["Actual", "Net Leftover"]))
+    m5.metric("Transactions", len(tx))
 
     left, right = st.columns([3, 2])
     with left:
@@ -159,11 +160,12 @@ def page_dashboard():
             fig.update_layout(showlegend=True, height=420, margin=dict(t=40, b=0))
             st.plotly_chart(fig, width="stretch")
 
-    a, b = st.columns(2)
-    with a:
-        show_paycheck(paycheck_lines(months, "mid"), PERIOD_LABEL["mid"] + (f" ({len(months)} months)" if mode == "Year" else ""))
-    with b:
-        show_paycheck(paycheck_lines(months, "end"), PERIOD_LABEL["end"] + (f" ({len(months)} months)" if mode == "Year" else ""))
+    shown = {p: paycheck_lines(months, p) for p in PAYCHECK_PERIODS}
+    if shown["commission"].empty or not shown["commission"]["amount"].any():
+        del shown["commission"]   # only show the commission paycheck when something was paid
+    for col, (period, lines) in zip(st.columns(len(shown)), shown.items()):
+        with col:
+            show_paycheck(lines, PERIOD_LABEL[period] + (f" ({len(months)} months)" if mode == "Year" else ""))
 
     st.subheader(f"Budget vs actual — {label}")
     bars = summary.drop(index=reports.TOTAL)
@@ -280,7 +282,9 @@ def page_budgets():
 # ============================================================ Paychecks
 def page_paychecks():
     st.title("Paychecks")
-    st.caption("Two paychecks per month. A month without saved paychecks uses the most recent earlier month.")
+    st.caption("Two regular paychecks per month plus an optional commission paycheck (all 0 until you fill it). A month without saved paychecks uses the most recent earlier month. "
+               "Put a commission in the Income / Commission line of the Commission Paycheck and enter its taxes; "
+               "that paycheck is not carried forward to later months.")
     month = st.text_input("Month (YYYY-MM)", value=THIS_MONTH)
     saved = db.fetch_paychecks(month)
     lines = saved
@@ -292,17 +296,19 @@ def page_paychecks():
         st.caption(f"No paychecks saved for {month}. Prefilled from {lines['month'].iloc[0]}.")
 
     edited = {}
-    cols = st.columns(2)
+    cols = st.columns(len(PAYCHECK_PERIODS))
     for col, period in zip(cols, PAYCHECK_PERIODS):
         with col:
             st.subheader(PERIOD_LABEL[period])
             p = lines[lines["period"] == period][["category", "subcategory", "amount"]].reset_index(drop=True)
+            if p.empty:   # e.g. a month saved before the commission paycheck existed: start it at 0
+                p = lines[lines["period"] == "mid"][["category", "subcategory", "amount"]].assign(amount=0.0).reset_index(drop=True)
             e = st.data_editor(p, hide_index=True, disabled=["category", "subcategory"], width="stretch",
                                key=f"pay_{month}_{period}", height=(len(p) + 1) * 35 + 3,
                                column_config={"amount": st.column_config.NumberColumn(format="dollar", min_value=0.0)})
             t = db.paycheck_totals(e)
             st.metric("Total (take-home)", money(t["take_home"]))
-            st.caption(f"Gross {money(t['gross'])} − deductions {money(t['deductions'])}. "
+            st.caption(f"Gross {money(t['gross'])} (commission {money(t['commission'])}) − deductions {money(t['deductions'])}. "
                        f"401k: {money(t['retirement'])} + employer match {money(t['employer_match'])} "
                        f"({EMPLOYER_CATEGORY} lines are not part of take-home).")
             edited[period] = e.assign(period=period)
@@ -319,7 +325,7 @@ def page_paychecks():
         dst = b.text_input("To (YYYY-MM)", key="pay_dst")
         if st.button("Copy", key="pay_copy") and src and dst:
             n = db.copy_paychecks_forward(src, dst)
-            st.success(f"Copied {n} lines (existing lines in {dst} left untouched).")
+            st.success(f"Copied {n} lines (mid and end of month only; existing lines in {dst} left untouched).")
 
 
 # ============================================================ Shared expenses

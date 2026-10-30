@@ -126,7 +126,7 @@ def _migrate_v2(c: sqlite3.Connection) -> None:
             c.execute("INSERT INTO budgets(month, category, amount) VALUES(?,?,?)",
                       (month, name, float(config.DEFAULT_BUDGET.get(name, 0.0))))
     if not c.execute("SELECT 1 FROM paychecks").fetchone():
-        for period in config.PAYCHECK_PERIODS:
+        for period in ('mid', 'end'):   # the commission paycheck is added by _migrate_v6
             for i, (cat, sub, amt) in enumerate(config.DEFAULT_PAYCHECK):
                 c.execute("INSERT INTO paychecks VALUES(?,?,?,?,?,?)", (month, period, cat, sub, amt, i))
 
@@ -141,7 +141,37 @@ def _migrate_v4(c: sqlite3.Connection) -> None:
     _add_column(c, "transactions", "shared_amount", "REAL")
 
 
-MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4]   # index + 1 == version reached after running it
+def _migrate_v5(c: sqlite3.Connection) -> None:
+    """Commission: an Income/Commission line (0) right after Salary on every saved paycheck."""
+    sub = config.COMMISSION_SUBCATEGORY
+    for month, period, order in c.execute(
+            "SELECT month, period, sort_order FROM paychecks WHERE category=? AND subcategory='Salary' "
+            "AND NOT EXISTS (SELECT 1 FROM paychecks p2 WHERE p2.month=paychecks.month AND p2.period=paychecks.period "
+            "AND p2.category=? AND p2.subcategory=?)", (config.INCOME_CATEGORY,) * 2 + (sub,)).fetchall():
+        c.execute("UPDATE paychecks SET sort_order=sort_order+1 WHERE month=? AND period=? AND sort_order>?",
+                  (month, period, order))
+        c.execute("INSERT INTO paychecks VALUES(?,?,?,?,0,?)", (month, period, config.INCOME_CATEGORY, sub, order + 1))
+
+
+def _migrate_v6(c: sqlite3.Connection) -> None:
+    """Third paycheck period 'commission' (widen the CHECK) with every line at 0 for each saved month."""
+    c.execute("ALTER TABLE paychecks RENAME TO paychecks_old")
+    c.execute("""CREATE TABLE paychecks (
+        month       TEXT NOT NULL,                     -- yyyy-mm
+        period      TEXT NOT NULL CHECK (period IN ('mid','end','commission')),
+        category    TEXT NOT NULL,
+        subcategory TEXT NOT NULL,
+        amount      REAL NOT NULL,
+        sort_order  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (month, period, category, subcategory)
+    )""")
+    c.execute("INSERT INTO paychecks SELECT * FROM paychecks_old")
+    c.execute("INSERT INTO paychecks SELECT month, 'commission', category, subcategory, 0, sort_order "
+              "FROM paychecks_old WHERE period='mid'")
+    c.execute("DROP TABLE paychecks_old")
+
+
+MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6]   # index + 1 == version reached after running it
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -542,7 +572,10 @@ def effective_paychecks(month: str) -> pd.DataFrame:
         row = c.execute("SELECT MAX(month) AS m FROM paychecks WHERE month<=?", (month,)).fetchone()
     if not row or not row["m"]:
         return pd.DataFrame(columns=["month", "period", "category", "subcategory", "amount", "sort_order"])
-    return fetch_paychecks(row["m"])
+    lines = fetch_paychecks(row["m"])
+    if row["m"] != month:   # the occasional commission check is not repeated month after month
+        lines.loc[lines["period"] == "commission", "amount"] = 0.0
+    return lines
 
 
 def save_paychecks(month: str, lines: pd.DataFrame) -> None:
@@ -556,10 +589,15 @@ def save_paychecks(month: str, lines: pd.DataFrame) -> None:
 
 
 def copy_paychecks_forward(from_month: str, to_month: str) -> int:
+    """Copy the regular (mid/end) paychecks; the commission paycheck is never copied, it starts at 0."""
     with connect() as c:
-        return c.execute(
+        n = c.execute(
             "INSERT OR IGNORE INTO paychecks SELECT ?, period, category, subcategory, amount, sort_order "
-            "FROM paychecks WHERE month=?", (to_month, from_month)).rowcount
+            "FROM paychecks WHERE month=? AND period<>'commission'", (to_month, from_month)).rowcount
+        c.execute(
+            "INSERT OR IGNORE INTO paychecks SELECT ?, 'commission', category, subcategory, 0, sort_order "
+            "FROM paychecks WHERE month=? AND period='mid'", (to_month, from_month))
+        return n
 
 
 def paycheck_totals(lines: pd.DataFrame) -> dict:
@@ -571,9 +609,11 @@ def paycheck_totals(lines: pd.DataFrame) -> dict:
     retirement = deductions & (sub == config.RETIREMENT_SUBCATEGORY)
     taxes = deductions & cat.isin(config.TAX_CATEGORIES)
     gross = float(amt[income].sum())
+    commission = float(amt[income & (sub == config.COMMISSION_SUBCATEGORY)].sum())
     total_ded = float(amt[deductions].sum())
     return {
         "gross": gross,
+        "commission": commission,
         "taxes": float(amt[taxes].sum()),
         "other": float(amt[deductions & ~taxes & ~retirement].sum()),
         "retirement": float(amt[retirement].sum()),

@@ -39,7 +39,7 @@ def budget_by_category(months: list[str]) -> pd.Series:
 
 def paycheck_summary(months: list[str]) -> dict:
     """Sum db.paycheck_totals over both paychecks of every month in `months` (with carry-forward)."""
-    keys = ["gross", "taxes", "other", "retirement", "employer_match", "deductions", "take_home"]
+    keys = ["gross", "commission", "taxes", "other", "retirement", "employer_match", "deductions", "take_home"]
     out = {k: 0.0 for k in keys}
     for m in months:
         lines = db.effective_paychecks(m)

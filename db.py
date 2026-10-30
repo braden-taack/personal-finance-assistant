@@ -171,7 +171,20 @@ def _migrate_v6(c: sqlite3.Connection) -> None:
     c.execute("DROP TABLE paychecks_old")
 
 
-MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6]   # index + 1 == version reached after running it
+def _migrate_v7(c: sqlite3.Connection) -> None:
+    """Split State Taxes into SITW (the old Withholding amount), NYPFL and NY Disability (0 for saved paychecks)."""
+    for month, period, order in c.execute(
+            "SELECT month, period, sort_order FROM paychecks WHERE category='State Taxes' "
+            "AND subcategory='Withholding'").fetchall():
+        c.execute("UPDATE paychecks SET sort_order=sort_order+2 WHERE month=? AND period=? AND sort_order>?",
+                  (month, period, order))
+        c.execute("UPDATE paychecks SET subcategory='SITW' WHERE month=? AND period=? AND category='State Taxes' "
+                  "AND subcategory='Withholding'", (month, period))
+        for i, sub in enumerate(("NYPFL", "NY Disability"), 1):
+            c.execute("INSERT OR IGNORE INTO paychecks VALUES(?,?,?,?,0,?)", (month, period, "State Taxes", sub, order + i))
+
+
+MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7]   # index + 1 == version reached after running it
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

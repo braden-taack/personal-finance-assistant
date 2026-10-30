@@ -35,7 +35,7 @@ assert sqlite3.connect(old).execute("PRAGMA user_version").fetchone()[0] == 0
 db.DB_PATH = old
 db.init_db()
 db.init_db()  # second run must be a no-op
-assert db.schema_version() == db.SCHEMA_VERSION == 6
+assert db.schema_version() == db.SCHEMA_VERSION == 7
 tx_old = db.fetch_transactions().set_index("description")
 assert len(tx_old) == 3, "migration lost rows"
 assert tx_old.loc["KROGER 0932", "bank"] == "AMEX" and pd.isna(tx_old.loc["CHIPOTLE 2231", "bank"])
@@ -63,6 +63,8 @@ print(t1)
 assert close(t1.loc["Budgeted", "Net Leftover"], -628.71)        # 4670.42 - 5299.13
 assert close(t1.loc["Budgeted", "Liquid Saved"], 1000)
 assert close(t1.loc["Budgeted", "401k Saved"], 3875.92)          # 4 x 968.98 (employer match assumption)
+st_ = pay[(pay["category"] == "State Taxes") & (pay["period"] == "mid")].set_index("subcategory")["amount"]
+assert st_.to_dict() == {"SITW": 188.24, "NYPFL": 0.0, "NY Disability": 0.0}, st_
 com = pay[pay["period"] == "commission"]
 assert len(com) == len(pay[pay["period"] == "mid"]) and (com["amount"] == 0).all()
 assert close(db.paycheck_totals(com)["take_home"], 0)

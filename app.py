@@ -664,14 +664,16 @@ def import_csv_tab():
         flags[i] = "payment/transfer"
     for d in dups:
         flags[d["new_idx"]] = "possible duplicate"
-    preview = pd.DataFrame({"skip": False, "flag": flags, "date": clean["date"].where(clean["date_missing"] == 0, clean["date_raw"]),
+    preview = pd.DataFrame({"skip": False, "shared": clean["shared"].astype(bool), "flag": flags, "date": clean["date"].where(clean["date_missing"] == 0, clean["date_raw"]),
                             "bank": clean["bank"], "description": clean["description"], "amount": clean["amount"]})
-    st.subheader("Preview — tick Skip to leave a row out")
+    st.subheader("Preview — tick Skip to leave a row out, Shared to split it with the roommate")
     edited = st.data_editor(preview, key=f"preview_{file_key}", width="stretch", height=400,
-                            disabled=[c for c in preview.columns if c != "skip"],
+                            disabled=[c for c in preview.columns if c not in ("skip", "shared")],
                             column_config={"skip": st.column_config.CheckboxColumn("Skip"),
+                                           "shared": st.column_config.CheckboxColumn("Shared"),
                                            "amount": st.column_config.NumberColumn(format="%.2f")})
     manual_skip = set(edited.index[edited["skip"]])
+    shared_now = edited["shared"].astype(int)
     if manual_skip:
         st.caption(f"{len(manual_skip)} row(s) manually skipped.")
 
@@ -743,6 +745,8 @@ def import_csv_tab():
         if exclude_undated:
             skip |= set(still_missing)
         keep = clean.drop(index=list(skip)).copy()
+        keep["shared"] = shared_now.loc[keep.index]
+        keep.loc[keep["shared"] == 0, ["shared_settled", "shared_settled_date"]] = [0, None]
         for i, d in fixes.items():
             if i in keep.index:
                 keep.at[i, "date"] = d

@@ -19,7 +19,7 @@ import importer
 import llm
 import pipeline
 import reports
-from config import EMPLOYER_CATEGORY, LLM_BASE_URL, LLM_THRESHOLD, ML_THRESHOLD, PAYCHECK_PERIODS, SHARED_SPLIT
+from config import EMPLOYER_CATEGORY, SAVINGS_CATEGORIES, LLM_BASE_URL, LLM_THRESHOLD, ML_THRESHOLD, PAYCHECK_PERIODS, SHARED_SPLIT
 
 st.set_page_config(page_title="Finance Tracker", page_icon="💰", layout="wide")
 db.init_db()
@@ -83,6 +83,11 @@ def color_difference(v: float) -> str:
     if v < -0.005:
         return "color: #cf222e; font-weight: 600"
     return ""
+
+
+def color_difference_col(col: pd.Series) -> list[str]:
+    """Difference = Budget - Actual. Savings categories are good when actual exceeds budget, so flip."""
+    return [color_difference(-v if name in SAVINGS_CATEGORIES else v) for name, v in col.items()]
 
 
 def bold_total(row: pd.Series) -> list[str]:
@@ -184,7 +189,7 @@ def page_dashboard():
     left, right = st.columns([3, 2])
     with left:
         st.subheader(f"Summary by Category — {label}")
-        st.dataframe(summary.style.format(MONEY).map(color_difference, subset=["Difference"]).apply(bold_total, axis=1),
+        st.dataframe(summary.style.format(MONEY).apply(color_difference_col, subset=["Difference"]).apply(bold_total, axis=1),
                      width="stretch", height=(len(summary) + 1) * 35 + 3)
         st.caption(f"Actual counts shared transactions at {SHARED_SPLIT:.0%} (my share).")
     with right:

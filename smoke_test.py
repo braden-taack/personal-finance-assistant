@@ -135,6 +135,10 @@ assert len(d) == 1 and d[0]["exact"] and d[0]["match_source"] == "db"
 in_file = pd.concat([clean.iloc[[0]], clean.iloc[[0]], clean.iloc[[0]].assign(bank="DISCOVER")], ignore_index=True)
 d = importer.find_duplicates(in_file)
 assert [(x["new_idx"], x["match_source"]) for x in d] == [(1, "file")]  # DISCOVER copy is not a duplicate
+fuzzy = amex_row.assign(date="2026-10-04", description="Whole Foods Market NYC")
+d = importer.find_duplicates(fuzzy)
+assert len(d) == 1 and not d[0]["exact"] and d[0]["days_apart"] == 3    # shifted date + reworded description
+assert importer.find_duplicates(fuzzy.assign(date="2026-10-20")) == []   # too far apart
 print("same-bank duplicates: OK")
 
 out = pipeline.categorize_frame(clean.drop(index=[1]), use_llm=True)

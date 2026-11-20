@@ -34,8 +34,10 @@ ML_THRESHOLD = float(os.environ.get("FT_ML_THRESHOLD", "0.90"))    # below -> as
 LLM_THRESHOLD = float(os.environ.get("FT_LLM_THRESHOLD", "1.01"))  # below -> manual review
 
 # Duplicate detection
-DUP_DATE_WINDOW_DAYS = int(os.environ.get("FT_DUP_WINDOW", "3"))
-DUP_DESC_SIMILARITY = float(os.environ.get("FT_DUP_SIM", "0.85"))
+# Charge date vs. posted date often differ by a few days, and descriptions differ in store numbers,
+# city suffixes, "PENDING", etc., so matching is deliberately loose; non-exact matches need review.
+DUP_DATE_WINDOW_DAYS = int(os.environ.get("FT_DUP_WINDOW", "5"))
+DUP_DESC_SIMILARITY = float(os.environ.get("FT_DUP_SIM", "0.6"))
 
 # Minimum labeled rows needed before the ML model is trained
 MIN_TRAIN_ROWS = 20

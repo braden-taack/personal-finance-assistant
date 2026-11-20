@@ -169,8 +169,23 @@ def flag_transfers(df: pd.DataFrame) -> list[int]:
     return hits
 
 
+def _norm_desc(s: str) -> str:
+    """Lowercase, drop store/reference numbers and punctuation so 'WHOLE FOODS #999 NYC' ~ 'Whole Foods'."""
+    s = re.sub(r"[#*]?\d+", " ", str(s).lower())
+    return " ".join(re.sub(r"[^a-z ]", " ", s).split())
+
+
 def _sim(a: str, b: str) -> float:
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+    """Description similarity in [0, 1]: best of raw ratio, normalized ratio and token overlap."""
+    a, b = str(a), str(b)
+    raw = SequenceMatcher(None, a.lower(), b.lower()).ratio()
+    na, nb = _norm_desc(a), _norm_desc(b)
+    if not na or not nb:
+        return raw
+    norm = SequenceMatcher(None, na, nb).ratio()
+    ta, tb = set(na.split()), set(nb.split())
+    overlap = len(ta & tb) / min(len(ta), len(tb))   # one description may just be a longer version
+    return max(raw, norm, 0.9 * overlap)
 
 
 def _same_bank(a, b) -> bool:
@@ -185,8 +200,9 @@ def find_duplicates(new: pd.DataFrame) -> list[dict]:
 
     A pair is a *probable* duplicate when the bank is the same, amounts match exactly, dates
     are within DUP_DATE_WINDOW_DAYS, and descriptions are similar (>= DUP_DESC_SIMILARITY).
-    Exact same date + amount + description is flagged as 'exact'. Rows without a date are skipped.
-    Returns a list of {new_idx, match_source ('db'|'file'), match (dict), score, exact}.
+    Exact same date + amount + description is flagged as 'exact'; everything else is a fuzzy match
+    the user must review. Rows without a date are skipped.
+    Returns a list of {new_idx, match_source ('db'|'file'), match (dict), score, exact, days_apart}.
     """
     existing = db.fetch_transactions()
     hits: list[dict] = []
@@ -222,12 +238,14 @@ def find_duplicates(new: pd.DataFrame) -> list[dict]:
         for src, ref, d, desc, amt, bank in candidates:
             s = _sim(row["description"], desc)
             if s >= DUP_DESC_SIMILARITY and (best is None or s > best["score"]):
+                gap = abs((pd.Timestamp(d) - row["_dt"]).days)
                 best = {
                     "new_idx": i,
                     "match_source": src,
                     "match": {"ref": ref, "date": d, "description": desc, "amount": amt, "bank": bank},
                     "score": round(s, 3),
                     "exact": s == 1.0 and d == row["date"],
+                    "days_apart": gap,
                 }
         if best:
             hits.append(best)

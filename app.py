@@ -690,7 +690,9 @@ def import_csv_tab():
     # ---- duplicates
     if dups:
         st.subheader("Possible duplicates — choose what to do")
-        bulk = st.radio("Default for all", ["Skip duplicates", "Import anyway"], horizontal=True)
+        st.caption("Exact matches default to skip. Matches with a different date or description "
+                   "(e.g. charge date vs. posted date) need your decision before you can import.")
+        bulk = st.radio("Default for exact matches", ["Skip duplicates", "Import anyway"], horizontal=True)
         for d in dups:
             i = d["new_idx"]
             row = clean.loc[i]
@@ -700,15 +702,22 @@ def import_csv_tab():
                 a.markdown(f"**New:** {row['date']} · {row['bank']} · {row['description']} · {money(row['amount'])}")
                 b.markdown(f"**{'Already in DB' if d['match_source'] == 'db' else 'Earlier in this file'}:** "
                            f"{mt['date']} · {mt['bank'] or '—'} · {mt['description']} · {money(mt['amount'])}")
-                st.caption(f"similarity {d['score']:.0%}" + (" · exact match" if d["exact"] else ""))
-                choice = st.radio("Action", ["Skip duplicates", "Import anyway"],
-                                  index=0 if bulk == "Skip duplicates" else 1,
-                                  key=f"dup_{i}", horizontal=True, label_visibility="collapsed")
-                decisions[i] = "skip" if choice.startswith("Skip") else "import"
+                st.caption(f"similarity {d['score']:.0%} · "
+                           + ("exact match" if d["exact"] else f"{d['days_apart']} day(s) apart — review"))
+                options = ["Skip duplicates", "Import anyway"]
+                choice = st.radio("Action", options, key=f"dup_{i}", horizontal=True,
+                                  index=options.index(bulk) if d["exact"] else None,
+                                  label_visibility="collapsed")
+                if choice is not None:
+                    decisions[i] = "skip" if choice.startswith("Skip") else "import"
 
     still_missing = [i for i in missing if i not in fixes]
     blocked = bool(still_missing) and not exclude_undated
-    if blocked:
+    pending_dups = sum(1 for d in dups if d["new_idx"] not in decisions)
+    if pending_dups:
+        blocked = True
+        st.warning(f"{pending_dups} possible duplicate(s) still need a decision.")
+    elif blocked:
         st.warning(f"{len(still_missing)} row(s) still need a date (or tick “Leave out rows I haven't dated yet”).")
     if st.button("Categorize & import", type="primary", disabled=blocked):
         skip = {i for i, d in decisions.items() if d == "skip"} | transfer_skip

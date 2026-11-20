@@ -89,8 +89,9 @@ Only date, description and amount are required. Amount can be one signed column,
      because they double-count card purchases. Fidelity "Investing Transfer" / "Savings Transfer" are not flagged;
      they map straight to Investing / Savings.
    - **Duplicates**, against the database and within the file. A duplicate needs the same bank, the same amount,
-     dates within 3 days and description similarity >= 85%. Legacy rows with no bank match any bank. You choose
-     skip or import per pair.
+     dates within 5 days (charge vs. posted dates often differ) and a similar description (store numbers and
+     punctuation are ignored; >= 60%). Legacy rows with no bank match any bank. Exact matches default to skip;
+     anything fuzzy has no default and must be reviewed (skip or import) before you can import.
 
 **Numbers files (one file per year, one sheet per month)**: `tools/numbers_import.py` reads `.numbers` files directly,
 with no Numbers app needed:

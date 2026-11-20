@@ -656,6 +656,25 @@ def import_csv_tab():
         st.info(f"Category values that aren't budget categories go through the ML → LLM → review cascade: "
                 f"{', '.join(map(str, unknown[:15]))}{'…' if len(unknown) > 15 else ''}")
 
+    # ---- full preview with a manual skip column
+    flags = pd.Series("", index=clean.index)
+    for i in missing:
+        flags[i] = "missing date"
+    for i in transfers:
+        flags[i] = "payment/transfer"
+    for d in dups:
+        flags[d["new_idx"]] = "possible duplicate"
+    preview = pd.DataFrame({"skip": False, "flag": flags, "date": clean["date"].where(clean["date_missing"] == 0, clean["date_raw"]),
+                            "bank": clean["bank"], "description": clean["description"], "amount": clean["amount"]})
+    st.subheader("Preview — tick Skip to leave a row out")
+    edited = st.data_editor(preview, key=f"preview_{file_key}", width="stretch", height=400,
+                            disabled=[c for c in preview.columns if c != "skip"],
+                            column_config={"skip": st.column_config.CheckboxColumn("Skip"),
+                                           "amount": st.column_config.NumberColumn(format="%.2f")})
+    manual_skip = set(edited.index[edited["skip"]])
+    if manual_skip:
+        st.caption(f"{len(manual_skip)} row(s) manually skipped.")
+
     # ---- blank dates: fix before import
     fixes: dict[int, str] = {}
     exclude_undated = False
@@ -711,16 +730,16 @@ def import_csv_tab():
                 if choice is not None:
                     decisions[i] = "skip" if choice.startswith("Skip") else "import"
 
-    still_missing = [i for i in missing if i not in fixes]
+    still_missing = [i for i in missing if i not in fixes and i not in manual_skip]
     blocked = bool(still_missing) and not exclude_undated
-    pending_dups = sum(1 for d in dups if d["new_idx"] not in decisions)
+    pending_dups = sum(1 for d in dups if d["new_idx"] not in decisions and d["new_idx"] not in manual_skip)
     if pending_dups:
         blocked = True
         st.warning(f"{pending_dups} possible duplicate(s) still need a decision.")
     elif blocked:
         st.warning(f"{len(still_missing)} row(s) still need a date (or tick “Leave out rows I haven't dated yet”).")
     if st.button("Categorize & import", type="primary", disabled=blocked):
-        skip = {i for i, d in decisions.items() if d == "skip"} | transfer_skip
+        skip = {i for i, d in decisions.items() if d == "skip"} | transfer_skip | manual_skip
         if exclude_undated:
             skip |= set(still_missing)
         keep = clean.drop(index=list(skip)).copy()
